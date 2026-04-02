@@ -1,12 +1,7 @@
-2024010779@conv0:~/PA1$ ./run.sh
-srun: job 898310 queued and waiting for resources
-srun: job 898310 has been allocated resources
 Process 0 handles [0, 100000000)
 Rank 0: pass
 Execution time of function sort is 12440.555000 ms.
 Process 0: finalize
-srun: job 898311 queued and waiting for resources
-srun: job 898311 has been allocated resources
 Process 1 handles [50000000, 100000000)
 Rank 1: pass
 Process 1: finalize
@@ -14,8 +9,6 @@ Process 0 handles [0, 50000000)
 Rank 0: pass
 Execution time of function sort is 6761.104000 ms.
 Process 0: finalize
-srun: job 898312 queued and waiting for resources
-srun: job 898312 has been allocated resources
 Process 3 handles [75000000, 100000000)
 Rank 3: pass
 Process 3: finalize
@@ -29,8 +22,6 @@ Process 0 handles [0, 25000000)
 Rank 0: pass
 Execution time of function sort is 3752.111000 ms.
 Process 0: finalize
-srun: job 898313 queued and waiting for resources
-srun: job 898313 has been allocated resources
 Process 6 handles [75000000, 87500000)
 Rank 6: pass
 Process 6: finalize
@@ -56,8 +47,6 @@ Process 4: finalize
 Process 5 handles [62500000, 75000000)
 Rank 5: pass
 Process 5: finalize
-srun: job 898314 queued and waiting for resources
-srun: job 898314 has been allocated resources
 Process 3 handles [18750000, 25000000)
 Rank 3: pass
 Process 3: finalize
@@ -107,8 +96,6 @@ Process 2: finalize
 Process 6 handles [37500000, 43750000)
 Rank 6: pass
 Process 6: finalize
-srun: job 898315 queued and waiting for resources
-srun: job 898315 has been allocated resources
 Process 15 handles [93750000, 100000000)
 Rank 15: pass
 Process 15: finalize
