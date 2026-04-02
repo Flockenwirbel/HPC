@@ -1,0 +1,1 @@
+# Einführung in das Hochleistungsrechnen, Frühjahr 2026, Kurs von Jidong Zhai

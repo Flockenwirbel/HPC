@@ -1,0 +1,362 @@
+2024010779@conv0:~/exp1$ ./osu_latency_ib.sh
++ srun -n 2 -N 2 /home/course/hpc/tools/osu_latency
+srun: job 894039 queued and waiting for resources
+srun: job 894039 has been allocated resources
+# OSU MPI Latency Test v7.3
+# Size          Latency (us)
+# Datatype: MPI_CHAR.
+1                       0.95
+2                       0.93
+4                       0.92
+8                       0.92
+16                      0.93
+32                      0.98
+64                      1.07
+128                     1.14
+256                     1.60
+512                     1.71
+1024                    1.92
+2048                    2.33
+4096                    3.16
+8192                    4.52
+16384                   6.36
+32768                   8.35
+65536                  11.54
+131072                 18.16
+262144                 31.49
+524288                 55.53
+1048576               100.34
+2097152               184.74
+4194304               360.43
+2024010779@conv0:~/exp1$ ./osu_bw_ib.sh
++ srun -n 2 -N 2 /home/course/hpc/tools/osu_bw
+srun: job 894040 queued and waiting for resources
+srun: job 894040 has been allocated resources
+# OSU MPI Bandwidth Test v7.3
+# Size      Bandwidth (MB/s)
+# Datatype: MPI_CHAR.
+1                       7.44
+2                      15.18
+4                      30.50
+8                      61.18
+16                    121.79
+32                    246.21
+64                    415.10
+128                   813.89
+256                  1328.71
+512                  2456.89
+1024                 3747.44
+2048                 6157.93
+4096                 8642.09
+8192                10009.54
+16384               10609.09
+32768               11392.32
+65536               11673.18
+131072              11860.84
+262144              11954.75
+524288              12008.89
+1048576             12042.52
+2097152             12058.59
+4194304             12064.62
+2024010779@conv0:~/exp1$ ./task2.sh
++ srun -N 2 -n 2 ./mpi_sync 10 100000000 10
+srun: job 894041 queued and waiting for resources
+srun: job 894041 has been allocated resources
+Iter 0 MPI_Send: 66.4531 ms
+Iter 0 Compute: 10.0001 ms
+Iter 1 MPI_Send: 66.4905 ms
+Iter 1 Compute: 10.0001 ms
+Iter 2 MPI_Send: 66.4823 ms
+Iter 2 Compute: 10.0001 ms
+Iter 3 MPI_Send: 66.4806 ms
+Iter 3 Compute: 10.0001 ms
+Iter 4 MPI_Send: 66.5101 ms
+Iter 4 Compute: 10.0001 ms
+Iter 5 MPI_Send: 66.4865 ms
+Iter 5 Compute: 10.0001 ms
+Iter 6 MPI_Send: 66.4739 ms
+Iter 6 Compute: 10.0001 ms
+Iter 7 MPI_Send: 66.4792 ms
+Iter 7 Compute: 10.0001 ms
+Iter 8 MPI_Send: 66.4959 ms
+Iter 8 Compute: 10.0001 ms
+Iter 9 MPI_Send: 66.4743 ms
+Iter 9 Compute: 10.0001 ms
+Total: 764.949 ms
++ srun -N 2 -n 2 ./mpi_async 10 100000000 10
+srun: job 894042 queued and waiting for resources
+srun: job 894042 has been allocated resources
+Iter 0 MPI_Isend: 0.047375 ms
+Iter 0 Compute: 10.064 ms
+Iter 1 MPI_Isend: 0.001195 ms
+Iter 1 Compute: 10.0024 ms
+Iter 2 MPI_Isend: 0.000447 ms
+Iter 2 Compute: 10.0017 ms
+Iter 3 MPI_Isend: 0.000385 ms
+Iter 3 Compute: 10.0015 ms
+Iter 4 MPI_Isend: 0.0004 ms
+Iter 4 Compute: 10.0016 ms
+Iter 5 MPI_Isend: 0.000423 ms
+Iter 5 Compute: 10.0014 ms
+Iter 6 MPI_Isend: 0.000427 ms
+Iter 6 Compute: 10.0014 ms
+Iter 7 MPI_Isend: 0.000422 ms
+Iter 7 Compute: 10.0014 ms
+Iter 8 MPI_Isend: 0.000428 ms
+Iter 8 Compute: 10.0015 ms
+Iter 9 MPI_Isend: 0.000433 ms
+Iter 9 Compute: 10.0014 ms
+Wait Request: 599.257 ms
+Total: 699.426 ms
++ srun -N 2 -n 2 ./mpi_sync 10 100000000 20
+srun: job 894043 queued and waiting for resources
+srun: job 894043 has been allocated resources
+Iter 0 MPI_Send: 83.4659 ms
+Iter 0 Compute: 20.0001 ms
+Iter 1 MPI_Send: 83.7024 ms
+Iter 1 Compute: 20.0001 ms
+Iter 2 MPI_Send: 83.7142 ms
+Iter 2 Compute: 20.0001 ms
+Iter 3 MPI_Send: 83.6886 ms
+Iter 3 Compute: 20.0001 ms
+Iter 4 MPI_Send: 83.746 ms
+Iter 4 Compute: 20.0001 ms
+Iter 5 MPI_Send: 83.7401 ms
+Iter 5 Compute: 20.0001 ms
+Iter 6 MPI_Send: 83.7286 ms
+Iter 6 Compute: 20.0001 ms
+Iter 7 MPI_Send: 83.7344 ms
+Iter 7 Compute: 20.0001 ms
+Iter 8 MPI_Send: 83.7715 ms
+Iter 8 Compute: 20.0001 ms
+Iter 9 MPI_Send: 83.6824 ms
+Iter 9 Compute: 20.0001 ms
+Total: 1037.1 ms
++ srun -N 2 -n 2 ./mpi_async 10 100000000 20
+srun: job 894044 queued and waiting for resources
+srun: job 894044 has been allocated resources
+Iter 0 MPI_Isend: 0.048365 ms
+Iter 0 Compute: 20.0731 ms
+Iter 1 MPI_Isend: 0.001427 ms
+Iter 1 Compute: 20.0025 ms
+Iter 2 MPI_Isend: 0.000382 ms
+Iter 2 Compute: 20.0016 ms
+Iter 3 MPI_Isend: 0.000364 ms
+Iter 3 Compute: 20.0015 ms
+Iter 4 MPI_Isend: 0.00041 ms
+Iter 4 Compute: 20.0016 ms
+Iter 5 MPI_Isend: 0.000408 ms
+Iter 5 Compute: 20.0014 ms
+Iter 6 MPI_Isend: 0.000383 ms
+Iter 6 Compute: 20.0014 ms
+Iter 7 MPI_Isend: 0.000871 ms
+Iter 7 Compute: 20.0016 ms
+Iter 8 MPI_Isend: 0.000407 ms
+Iter 8 Compute: 20.0014 ms
+Iter 9 MPI_Isend: 0.000405 ms
+Iter 9 Compute: 20.0014 ms
+Wait Request: 637.118 ms
+Total: 837.301 ms
++ srun -N 2 -n 2 ./mpi_sync 10 100000000 40
+srun: job 894045 queued and waiting for resources
+srun: job 894045 has been allocated resources
+Iter 0 MPI_Send: 83.4569 ms
+Iter 0 Compute: 40.0001 ms
+Iter 1 MPI_Send: 83.9192 ms
+Iter 1 Compute: 40.0001 ms
+Iter 2 MPI_Send: 83.9361 ms
+Iter 2 Compute: 40.0001 ms
+Iter 3 MPI_Send: 83.9452 ms
+Iter 3 Compute: 40.0001 ms
+Iter 4 MPI_Send: 83.9626 ms
+Iter 4 Compute: 40.0001 ms
+Iter 5 MPI_Send: 83.8965 ms
+Iter 5 Compute: 40.0001 ms
+Iter 6 MPI_Send: 83.9422 ms
+Iter 6 Compute: 40.0001 ms
+Iter 7 MPI_Send: 83.9686 ms
+Iter 7 Compute: 40.0001 ms
+Iter 8 MPI_Send: 83.9844 ms
+Iter 8 Compute: 40.0001 ms
+Iter 9 MPI_Send: 84 ms
+Iter 9 Compute: 40.0001 ms
+Total: 1239.14 ms
++ srun -N 2 -n 2 ./mpi_async 10 100000000 40
+srun: job 894046 queued and waiting for resources
+srun: job 894046 has been allocated resources
+Iter 0 MPI_Isend: 0.04927 ms
+Iter 0 Compute: 40.0652 ms
+Iter 1 MPI_Isend: 0.001278 ms
+Iter 1 Compute: 40.0024 ms
+Iter 2 MPI_Isend: 0.00042 ms
+Iter 2 Compute: 40.0016 ms
+Iter 3 MPI_Isend: 0.00043 ms
+Iter 3 Compute: 40.0016 ms
+Iter 4 MPI_Isend: 0.00047 ms
+Iter 4 Compute: 40.0014 ms
+Iter 5 MPI_Isend: 0.000973 ms
+Iter 5 Compute: 40.0018 ms
+Iter 6 MPI_Isend: 0.000477 ms
+Iter 6 Compute: 40.0015 ms
+Iter 7 MPI_Isend: 0.006032 ms
+Iter 7 Compute: 40.0019 ms
+Iter 8 MPI_Isend: 0.00054 ms
+Iter 8 Compute: 40.0015 ms
+Iter 9 MPI_Isend: 0.000391 ms
+Iter 9 Compute: 40.0014 ms
+Wait Request: 441.78 ms
+Total: 841.969 ms
++ srun -N 2 -n 2 ./mpi_sync 10 100000000 80
+srun: job 894047 queued and waiting for resources
+srun: job 894047 has been allocated resources
+Iter 0 MPI_Send: 83.4807 ms
+Iter 0 Compute: 80.0001 ms
+Iter 1 MPI_Send: 84.1936 ms
+Iter 1 Compute: 80.0001 ms
+Iter 2 MPI_Send: 84.2146 ms
+Iter 2 Compute: 80.0001 ms
+Iter 3 MPI_Send: 84.2068 ms
+Iter 3 Compute: 80.0001 ms
+Iter 4 MPI_Send: 84.2173 ms
+Iter 4 Compute: 80.0001 ms
+Iter 5 MPI_Send: 84.2509 ms
+Iter 5 Compute: 80.0001 ms
+Iter 6 MPI_Send: 84.2457 ms
+Iter 6 Compute: 80.0001 ms
+Iter 7 MPI_Send: 84.2499 ms
+Iter 7 Compute: 80.0001 ms
+Iter 8 MPI_Send: 84.2752 ms
+Iter 8 Compute: 80.0001 ms
+Iter 9 MPI_Send: 84.2865 ms
+Iter 9 Compute: 80.0001 ms
+Total: 1641.77 ms
++ srun -N 2 -n 2 ./mpi_async 10 100000000 80
+srun: job 894048 queued and waiting for resources
+srun: job 894048 has been allocated resources
+Iter 0 MPI_Isend: 0.049587 ms
+Iter 0 Compute: 80.0683 ms
+Iter 1 MPI_Isend: 0.001363 ms
+Iter 1 Compute: 80.0026 ms
+Iter 2 MPI_Isend: 0.000863 ms
+Iter 2 Compute: 80.002 ms
+Iter 3 MPI_Isend: 0.000429 ms
+Iter 3 Compute: 80.0015 ms
+Iter 4 MPI_Isend: 0.008058 ms
+Iter 4 Compute: 80.002 ms
+Iter 5 MPI_Isend: 0.000985 ms
+Iter 5 Compute: 80.0018 ms
+Iter 6 MPI_Isend: 0.00041 ms
+Iter 6 Compute: 80.0015 ms
+Iter 7 MPI_Isend: 0.00137 ms
+Iter 7 Compute: 80.0017 ms
+Iter 8 MPI_Isend: 0.000685 ms
+Iter 8 Compute: 80.0016 ms
+Iter 9 MPI_Isend: 0.000414 ms
+Iter 9 Compute: 80.0014 ms
+Wait Request: 36.5772 ms
+Total: 836.776 ms
++ srun -N 2 -n 2 ./mpi_sync 10 100000000 160
+srun: job 894049 queued and waiting for resources
+srun: job 894049 has been allocated resources
+Iter 0 MPI_Send: 83.4318 ms
+Iter 0 Compute: 160 ms
+Iter 1 MPI_Send: 84.3061 ms
+Iter 1 Compute: 160 ms
+Iter 2 MPI_Send: 84.2939 ms
+Iter 2 Compute: 160 ms
+Iter 3 MPI_Send: 84.2926 ms
+Iter 3 Compute: 160 ms
+Iter 4 MPI_Send: 84.309 ms
+Iter 4 Compute: 160 ms
+Iter 5 MPI_Send: 84.4375 ms
+Iter 5 Compute: 160 ms
+Iter 6 MPI_Send: 84.4887 ms
+Iter 6 Compute: 160 ms
+Iter 7 MPI_Send: 84.4857 ms
+Iter 7 Compute: 160 ms
+Iter 8 MPI_Send: 84.5267 ms
+Iter 8 Compute: 160 ms
+Iter 9 MPI_Send: 84.4751 ms
+Iter 9 Compute: 160 ms
+Total: 2443.23 ms
++ srun -N 2 -n 2 ./mpi_async 10 100000000 160
+srun: job 894050 queued and waiting for resources
+srun: job 894050 has been allocated resources
+Iter 0 MPI_Isend: 0.04584 ms
+Iter 0 Compute: 160.063 ms
+Iter 1 MPI_Isend: 0.001712 ms
+Iter 1 Compute: 160.003 ms
+Iter 2 MPI_Isend: 0.007115 ms
+Iter 2 Compute: 160.002 ms
+Iter 3 MPI_Isend: 0.000583 ms
+Iter 3 Compute: 160.002 ms
+Iter 4 MPI_Isend: 0.00126 ms
+Iter 4 Compute: 160.002 ms
+Iter 5 MPI_Isend: 0.001328 ms
+Iter 5 Compute: 160.002 ms
+Iter 6 MPI_Isend: 0.000759 ms
+Iter 6 Compute: 160.002 ms
+Iter 7 MPI_Isend: 0.018683 ms
+Iter 7 Compute: 160.002 ms
+Iter 8 MPI_Isend: 0.000739 ms
+Iter 8 Compute: 160.002 ms
+Iter 9 MPI_Isend: 0.020847 ms
+Iter 9 Compute: 160.002 ms
+Wait Request: 0.028358 ms
+Total: 1600.28 ms
+2024010779@conv0:~/exp1$ ./osu_latency_ethernet.sh
++ srun -n 2 -N 2 --export=ALL,UCX_NET_DEVICES=eno1 /home/course/hpc/tools/osu_latency -m :1048576
+srun: job 894051 queued and waiting for resources
+srun: job 894051 has been allocated resources
+# OSU MPI Latency Test v7.3
+# Size          Latency (us)
+# Datatype: MPI_CHAR.
+1                      41.27
+2                      41.46
+4                      41.45
+8                      41.53
+16                     41.61
+32                     41.78
+64                     42.79
+128                    44.74
+256                    49.49
+512                    54.79
+1024                   66.55
+2048                   83.80
+4096                  105.43
+8192                  160.49
+16384                 210.97
+32768                 355.00
+65536                 627.61
+131072               1188.52
+262144               2400.67
+524288               4632.08
+1048576              9075.53
+2024010779@conv0:~/exp1$ ./osu_bw_ethernet.sh
++ srun -n 2 -N 2 --export=ALL,UCX_NET_DEVICES=eno1 /home/course/hpc/tools/osu_bw -m :1048576
+srun: job 894052 queued and waiting for resources
+srun: job 894052 has been allocated resources
+# OSU MPI Bandwidth Test v7.3
+# Size      Bandwidth (MB/s)
+# Datatype: MPI_CHAR.
+1                       0.32
+2                       0.65
+4                       1.29
+8                       2.51
+16                      5.45
+32                      9.84
+64                     17.45
+128                    36.31
+256                    58.08
+512                    82.47
+1024                   96.66
+2048                  105.82
+4096                  111.18
+8192                  114.37
+16384                 116.10
+32768                 116.89
+65536                 117.15
+131072                117.41
+262144                117.53
+524288                117.58
+1048576               117.61
