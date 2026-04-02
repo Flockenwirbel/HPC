@@ -15,5 +15,5 @@ srun --nodes=1 -n 8 --cpu-bind=core ./odd_even_sort 100000000 /home/course/hpc/a
 # 1 machine * 16 processes
 srun --nodes=1 -n 16 --cpu-bind=core ./odd_even_sort 100000000 /home/course/hpc/assignments/2026/data/public/PA1/100000000.dat
 
-# 2 machines * 16 processes (8 per machine)
-srun --nodes=2 -n 16 --cpu-bind=core ./odd_even_sort 100000000 /home/course/hpc/assignments/2026/data/public/PA1/100000000.dat
+# 2 machines * 16 processes
+srun --nodes=2 -n 32 --cpu-bind=core ./odd_even_sort 100000000 /home/course/hpc/assignments/2026/data/public/PA1/100000000.dat
