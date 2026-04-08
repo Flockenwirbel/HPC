@@ -29,18 +29,31 @@ if [ "$#" -ge 3 ]; then
 	extra_args=("$@")
 
 	max_tasks=56
-	min_block=500
+	min_block=500          # intra-node: shared-memory MPI is cheap, be aggressive
+	min_block_cross=18000  # cross-node: amortize IB latency, kicks in at ~1M
 	ntasks=1
 
+	# First pass: prefer exact divisors → equal-sized blocks → minimum phases & fast-path merge
 	for ((p=max_tasks; p>=2; p--)); do
-		if [ $((num_elements % p)) -eq 0 ] && [ $((num_elements / p)) -ge $min_block ]; then
-			if [ "$p" -gt 28 ] && [ "$num_elements" -lt 1000000 ]; then
-				continue
-			fi
+		mb=$(( p > 28 ? min_block_cross : min_block ))
+		if [ $((p > 28 && p % 2 != 0)) -eq 1 ]; then continue; fi
+		if [ $((num_elements % p)) -eq 0 ] && [ $((num_elements / p)) -ge $mb ]; then
 			ntasks="$p"
 			break
 		fi
 	done
+
+	# Second pass: allow non-divisors if no exact divisor was found
+	if [ "$ntasks" -eq 1 ]; then
+		for ((p=max_tasks; p>=2; p--)); do
+			mb=$(( p > 28 ? min_block_cross : min_block ))
+			if [ $((p > 28 && p % 2 != 0)) -eq 1 ]; then continue; fi
+			if [ $((num_elements / p)) -ge $mb ]; then
+				ntasks="$p"
+				break
+			fi
+		done
+	fi
 
 	if [ "$ntasks" -gt 28 ]; then
 		nodes=2
