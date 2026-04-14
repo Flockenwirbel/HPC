@@ -2,135 +2,136 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mpi.h>
 
 #include "worker.h"
 
+static inline uint32_t float_to_sortable(float f) {
+	uint32_t u;
+	std::memcpy(&u, &f, sizeof(u));
+	uint32_t mask = (u >> 31) ? 0xFFFFFFFFu : 0x80000000u;
+	return u ^ mask;
+}
+
+static inline float sortable_to_float(uint32_t u) {
+	uint32_t mask = (u & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
+	u ^= mask;
+	float f;
+	std::memcpy(&f, &u, sizeof(f));
+	return f;
+}
+
+static void radix_sort_float(float* arr, size_t n) {
+	if (n <= 64) { std::sort(arr, arr + n); return; }
+
+	uint32_t* keys = new uint32_t[n];
+	uint32_t* buf  = new uint32_t[n];
+
+	for (size_t i = 0; i < n; i++)
+		keys[i] = float_to_sortable(arr[i]);
+
+	for (int shift = 0; shift < 32; shift += 8) {
+		size_t cnt[256] = {};
+		for (size_t i = 0; i < n; i++)
+			cnt[(keys[i] >> shift) & 0xFF]++;
+
+		size_t psum = 0;
+		for (int b = 0; b < 256; b++) {
+			size_t c = cnt[b];
+			cnt[b] = psum;
+			psum += c;
+		}
+
+		for (size_t i = 0; i < n; i++)
+			buf[cnt[(keys[i] >> shift) & 0xFF]++] = keys[i];
+
+		std::swap(keys, buf);
+	}
+
+	for (size_t i = 0; i < n; i++)
+		arr[i] = sortable_to_float(keys[i]);
+
+	delete[] keys;
+	delete[] buf;
+}
+
 void Worker::sort() {
 	if (out_of_range) return;
-	/** Your code ... */
-	// you can use variables in class Worker: n, nprocs, rank, block_len, data
 
-	if (nprocs == 1) {
-		std::sort(data, data + block_len);
+	size_t std_block = ceiling(n, (size_t)nprocs);
+	int activeprocs = (int)ceiling(n, std_block);
+
+	if (activeprocs == 1) {
+		radix_sort_float(data, block_len);
 		return;
 	}
 
-	auto get_partner = [this](int phase) {
+	auto get_partner = [this, activeprocs](int phase) {
 		int p = (this->rank % 2 == phase % 2) ? this->rank + 1 : this->rank - 1;
-		if (p < 0 || p >= (int)this->nprocs) return -1;
+		if (p < 0 || p >= activeprocs) return -1;
 		return p;
 	};
 
-	// Compute the actual block_len for any rank (ceiling division, last rank may be shorter)
-	size_t std_block = ceiling(n, (size_t)nprocs);
 	auto get_block_len = [&](int r) -> int {
-		if (r < 0 || r >= nprocs) return 0;
+		if (r < 0 || r >= activeprocs) return 0;
 		size_t off = std_block * r;
 		if (off >= n) return 0;
 		return (int)std::min(std_block, n - off);
 	};
 
 	// local sort
-	std::sort(data, data + block_len);
+	radix_sort_float(data, block_len);
 
-	float* allocated_buf = new float[block_len];
-	float* current_data = data;
-	float* other_data = allocated_buf;
+	float* swap_buf  = new float[block_len];
+	float* recv_buf  = new float[std_block];
+	float* cur  = data;
+	float* aux  = swap_buf;
 
-	// recv bufs sized to max possible partner block (std_block)
-	float* recv_buf[2];
-	recv_buf[0] = new float[std_block];
-	recv_buf[1] = new float[std_block];
+	MPI_Request reqs[2];
 
-	MPI_Request send_req = MPI_REQUEST_NULL;
-	MPI_Request recv_req[2] = {MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+	for (int phase = 0; phase < activeprocs; ++phase) {
+		int p = get_partner(phase);
+		if (p == -1) continue;
 
-	// pre-post recv for phase 0 to overlap with local sort
-	{
-		int p0 = get_partner(0);
-		if (p0 != -1)
-			MPI_Irecv(recv_buf[0], get_block_len(p0), MPI_FLOAT, p0, 0, MPI_COMM_WORLD, &recv_req[0]);
-	}
+		int pcl = get_block_len(p);
+		int tag = phase & 1;
 
-	for (int phase = 0; phase < nprocs; ++phase) {
-		int p_curr = get_partner(phase);
-		int buf_idx = phase % 2;
-		int next_buf = (phase + 1) % 2;
-		int p_next = (phase + 1 < nprocs) ? get_partner(phase + 1) : -1;
+		MPI_Irecv(recv_buf, pcl, MPI_FLOAT, p, tag, MPI_COMM_WORLD, &reqs[0]);
+		MPI_Isend(cur, (int)block_len, MPI_FLOAT, p, tag, MPI_COMM_WORLD, &reqs[1]);
+		MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE);
 
-		// pre-post recv for next phase
-		if (p_next != -1)
-			MPI_Irecv(recv_buf[next_buf], get_block_len(p_next), MPI_FLOAT, p_next, next_buf, MPI_COMM_WORLD, &recv_req[next_buf]);
+		bool merged = false;
 
-		if (p_curr != -1) {
-			int pcl = get_block_len(p_curr);
-			MPI_Isend(current_data, (int)block_len, MPI_FLOAT, p_curr, buf_idx, MPI_COMM_WORLD, &send_req);
-			MPI_Wait(&recv_req[buf_idx], MPI_STATUS_IGNORE);
-
-			bool merged = false;
-
-			if (rank < p_curr) {
-				// keep lower block_len elements
-				if (current_data[block_len - 1] > recv_buf[buf_idx][0]) {
-					int i = 0, j = 0, k = 0;
-					if (pcl == (int)block_len) {
-						// fast path: equal sizes, no bounds guard needed
-						while (k < (int)block_len) {
-							if (current_data[i] <= recv_buf[buf_idx][j]) other_data[k++] = current_data[i++];
-							else other_data[k++] = recv_buf[buf_idx][j++];
-						}
-					} else {
-						// slow path: partner (higher rank) has fewer elements
-						while (k < (int)block_len) {
-							if (j >= pcl || current_data[i] <= recv_buf[buf_idx][j]) other_data[k++] = current_data[i++];
-							else other_data[k++] = recv_buf[buf_idx][j++];
-						}
-					}
-					merged = true;
+		if (rank < p) {
+			// keep the lower block_len elements
+			if (cur[block_len - 1] > recv_buf[0]) {
+				int i = 0, j = 0, k = 0;
+				while (k < (int)block_len) {
+					if (j >= pcl || cur[i] <= recv_buf[j]) aux[k++] = cur[i++];
+					else                                    aux[k++] = recv_buf[j++];
 				}
-			} else {
-				// keep upper block_len elements
-				if (current_data[0] < recv_buf[buf_idx][pcl - 1]) {
-					int i = (int)block_len - 1, j = pcl - 1, k = (int)block_len - 1;
-					if (pcl == (int)block_len) {
-						// fast path: equal sizes
-						while (k >= 0) {
-							if (current_data[i] >= recv_buf[buf_idx][j]) other_data[k--] = current_data[i--];
-							else other_data[k--] = recv_buf[buf_idx][j--];
-						}
-					} else {
-						// slow path: we (higher rank) have more elements than partner
-						while (k >= 0) {
-							if (j < 0 || current_data[i] >= recv_buf[buf_idx][j]) other_data[k--] = current_data[i--];
-							else other_data[k--] = recv_buf[buf_idx][j--];
-						}
-					}
-					merged = true;
-				}
+				merged = true;
 			}
-
-			MPI_Wait(&send_req, MPI_STATUS_IGNORE);
-
-			if (merged) std::swap(current_data, other_data);
+		} else {
+			// keep the upper block_len elements
+			if (cur[0] < recv_buf[pcl - 1]) {
+				int i = (int)block_len - 1, j = pcl - 1, k = (int)block_len - 1;
+				while (k >= 0) {
+					if      (i < 0)                        aux[k--] = recv_buf[j--];
+					else if (j < 0 || cur[i] >= recv_buf[j]) aux[k--] = cur[i--];
+					else                                    aux[k--] = recv_buf[j--];
+				}
+				merged = true;
+			}
 		}
 
-		// Early termination: if no process merged this phase, the array is globally sorted.
-		// Cancel the pre-posted recv for the next phase before breaking.
-		int local_merged = (p_curr != -1 && /* merged flag captured below */ false) ? 1 : 0;
-		// Re-check: use a separate flag outside the if block
-		// (already have 'merged' in scope only inside; restructure below via global_merged)
-		int global_merged;
-		// 'merged' is declared inside the if block; hoist it via a phase-level variable
-		// See restructured loop below — this placeholder is replaced in the next edit.
-		(void)global_merged;
+		if (merged) std::swap(cur, aux);
 	}
 
-	if (current_data != data) {
-		std::copy(current_data, current_data + block_len, data);
-	}
+	if (cur != data)
+		std::copy(cur, cur + block_len, data);
 
-	delete[] allocated_buf;
-	delete[] recv_buf[0];
-	delete[] recv_buf[1];
+	delete[] swap_buf;
+	delete[] recv_buf;
 }
