@@ -1,0 +1,15 @@
+Running benchmark with n = 1000
+Validation Passed
+Time: 15.384890 ms
+Running benchmark with n = 2500
+Validation Passed
+Time: 377.787510 ms
+Running benchmark with n = 5000
+Validation Passed
+Time: 2986.158628 ms
+Running benchmark with n = 7500
+Validation Passed
+Time: 10050.542768 ms
+Running benchmark with n = 10000
+Validation Passed
+Time: 22833.929127 ms
