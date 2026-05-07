@@ -1,0 +1,19 @@
+# GTX 1080 = 61, Tesla P100 = 60
+nvcc -gencode arch=compute_60,code=sm_60 \
+	 -gencode arch=compute_61,code=sm_61 \
+	 -Xcompiler -Wall,-g,-O3 -Xptxas -O3 -o benchmark apsp.cu apsp_ref.cu benchmark.cu
+Running benchmark with n = 1000
+Validation Passed
+Time: 1.700033 ms
+Running benchmark with n = 2500
+Validation Passed
+Time: 15.355156 ms
+Running benchmark with n = 5000
+Validation Passed
+Time: 84.484336 ms
+Running benchmark with n = 7500
+Validation Passed
+Time: 315.790726 ms
+Running benchmark with n = 10000
+Validation Passed
+Time: 614.246553 ms

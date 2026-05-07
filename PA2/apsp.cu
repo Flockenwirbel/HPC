@@ -12,25 +12,24 @@ __global__ void phase1(int n, int k_start, int *graph) {
     int g_i = k_start + threadIdx.y * R;
     int g_j = k_start + threadIdx.x * R;
 
-    // reg
-    int reg[R][R];
-    for (int i = 0; i < R; ++i) {
-        for (int j = 0; j < R; ++j) {
-            int idx = (g_i + i) * n + (g_j + j);
-            reg[i][j] = (g_i + i < n && g_j + j < n) ? graph[idx] : INF;
-        }
-    }
-
     // shared mem
     __shared__ int shared[BS][BS];
     for (int ri = 0; ri < R; ++ri) {
         for (int rj = 0; rj < R; ++rj) {
-            int posx = threadIdx.x * R + rj;
+            int idx = (g_i + ri) * n + (g_j + rj);
             int posy = threadIdx.y * R + ri;
-            if (posx < BS && posy < BS) shared[posy][posx] = reg[ri][rj];
+            int posx = threadIdx.x * R + rj;
+            shared[posy][posx] = (g_i + ri < n && g_j + rj < n) ? graph[idx] : INF;
         }
     }
 
+    // reg
+    int reg[R][R];
+    for (int ri = 0; ri < R; ++ri) {
+        for (int rj = 0; rj < R; ++rj) {
+            reg[ri][rj] = shared[threadIdx.y * R + ri][threadIdx.x * R + rj];
+        }
+    }
     __syncthreads();
 
     for (int k = 0; k < BS; ++k) {
@@ -41,17 +40,6 @@ __global__ void phase1(int n, int k_start, int *graph) {
                 reg[ri][rj] = min(reg[ri][rj], shared[posy][k] + shared[k][posx]);
             }
         }
-
-        // write back to shared mem
-        for (int ri = 0; ri < R; ++ri) {
-            for (int rj = 0; rj < R; ++rj) {
-                int posx = threadIdx.x * R + rj;
-                int posy = threadIdx.y * R + ri;
-                shared[posy][posx] = reg[ri][rj];
-            }
-        }
-
-        __syncthreads();
     }
 
     // write back to global mem
@@ -98,10 +86,10 @@ __global__ void phase2_row(int n, int kb, int *graph) {
 
     // load reg
     int reg[R][R];
-    for (int ri = 0; ri < R; ++ri) 
+    for (int ri = 0; ri < R; ++ri)
         for (int rj = 0; rj < R; ++rj)
             reg[ri][rj] = shared_cur[threadIdx.y * R + ri][threadIdx.x * R + rj];
-    
+
 
     for (int k = 0; k < BS; ++k) {
         for (int ri = 0; ri < R; ++ri)
@@ -110,16 +98,6 @@ __global__ void phase2_row(int n, int kb, int *graph) {
                 int posy = threadIdx.y * R + ri;
                 reg[ri][rj] = min(reg[ri][rj], shared_pivot[posy][k] + shared_cur[k][posx]);
             }
-        
-
-        for (int ri = 0; ri < R; ++ri) 
-            for (int rj = 0; rj < R; ++rj) {
-                int posx = threadIdx.x * R + rj;
-                int posy = threadIdx.y * R + ri;
-                shared_cur[posy][posx] = reg[ri][rj];
-            }
-
-        __syncthreads();
     }
 
     // write back to global mem
@@ -168,10 +146,10 @@ __global__ void phase2_col(int n, int kb, int *graph) {
 
     // load reg
     int reg[R][R];
-    for (int ri = 0; ri < R; ++ri) 
+    for (int ri = 0; ri < R; ++ri)
         for (int rj = 0; rj < R; ++rj)
             reg[ri][rj] = shared_cur[threadIdx.y * R + ri][threadIdx.x * R + rj];
-    
+
 
     for (int k = 0; k < BS; ++k) {
         for (int ri = 0; ri < R; ++ri)
@@ -180,16 +158,6 @@ __global__ void phase2_col(int n, int kb, int *graph) {
                 int posy = threadIdx.y * R + ri;
                 reg[ri][rj] = min(reg[ri][rj], shared_cur[posy][k] + shared_pivot[k][posx]);
             }
-        
-
-        for (int ri = 0; ri < R; ++ri) 
-            for (int rj = 0; rj < R; ++rj) {
-                int posx = threadIdx.x * R + rj;
-                int posy = threadIdx.y * R + ri;
-                shared_cur[posy][posx] = reg[ri][rj];
-            }
-
-        __syncthreads();
     }
 
     // write back to global mem
@@ -217,15 +185,15 @@ __global__ void phase3(int n, int kb, int *graph) {
     // read pivot to shared row
     int row_i = kb * BS + l_i;
     int row_j = g_j + l_j;
-    for (int ri = 0; ri < R; ++ri) 
-        for (int rj = 0; rj < R; ++rj) 
+    for (int ri = 0; ri < R; ++ri)
+        for (int rj = 0; rj < R; ++rj)
             shared_row[l_i + ri][l_j + rj] =  (row_i + ri < n && row_j + rj < n) ? graph[(row_i + ri) * n + (row_j + rj)] : INF;
 
     // read pivot to shared col
     int col_i = g_i + l_i;
     int col_j = kb * BS + l_j;
-    for (int ri = 0; ri < R; ++ri) 
-        for (int rj = 0; rj < R; ++rj) 
+    for (int ri = 0; ri < R; ++ri)
+        for (int rj = 0; rj < R; ++rj)
             shared_col[l_i + ri][l_j + rj] = (col_i + ri < n && col_j + rj < n) ? graph[(col_i + ri) * n + (col_j + rj)] : INF;
 
     __syncthreads();
@@ -235,15 +203,15 @@ __global__ void phase3(int n, int kb, int *graph) {
     for (int ri = 0; ri < R; ++ri)
         for (int rj = 0; rj < R; ++rj)
             reg[ri][rj] = (g_i + l_i + ri < n && g_j + l_j + rj < n) ? graph[(g_i + l_i + ri) * n + (g_j + l_j + rj)] : INF;
-    
-    for (int k = 0; k < BS; ++k) 
+
+    for (int k = 0; k < BS; ++k)
         for (int ri = 0; ri < R; ++ri)
             for (int rj = 0; rj < R; ++rj) {
                 int posx = threadIdx.x * R + rj;
                 int posy = threadIdx.y * R + ri;
                 reg[ri][rj] = min(reg[ri][rj], shared_col[posy][k] + shared_row[k][posx]);
             }
-    
+
     // write back to global mem
     for (int ri = 0; ri < R; ++ri)
         for (int rj = 0; rj < R; ++rj) {
