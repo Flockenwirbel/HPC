@@ -242,10 +242,10 @@ __global__ void phase3(int n, int kb, int *graph) {
 }
 }
 
-void apsp(int n, /* device */ int *graph) {
-    const int B = 16;        // 16 threads per dim
-    const int R = 4;         // 4 elements per thread per dim
-    const int block_size = B * R;  // 64
+void apsp(int n, int *graph) {
+    const int B = 16;
+    const int R = 4;
+    const int block_size = B * R;
 
     int num_blocks = (n + block_size - 1) / block_size;
     dim3 thr(B, B);
@@ -253,7 +253,6 @@ void apsp(int n, /* device */ int *graph) {
     for (int kb = 0; kb < num_blocks; ++kb) {
         int k_start = kb * block_size;
 
-        // Phase 1
         phase1<B, R><<<1, thr>>>(n, k_start, graph);
 
         if (num_blocks > 1) {
