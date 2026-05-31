@@ -10,6 +10,7 @@ public:
     ~SpMMOpt() {
         if (d_light_rows) checkCudaErrors(cudaFree(d_light_rows));
         if (d_heavy_rows) checkCudaErrors(cudaFree(d_heavy_rows));
+        if (d_hub_rows) checkCudaErrors(cudaFree(d_hub_rows));
     }
      
     virtual void preprocess(float *vin, float *vout);
@@ -19,7 +20,9 @@ public:
 private:
     int *d_light_rows = nullptr;
     int *d_heavy_rows = nullptr;
+    int *d_hub_rows = nullptr;
     int num_light_rows = 0;
     int num_heavy_rows = 0;
+    int num_hub_rows = 0;
 };
 #endif
