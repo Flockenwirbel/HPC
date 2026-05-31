@@ -1,5 +1,6 @@
 #include "spmm_opt.h"
 
+#include <algorithm>
 #include <vector>
 
 __global__ void spmm_kernel_placeholder(int *ptr, int *idx, float *val, float *vin, float *vout, int num_v, int INFEATURE)
@@ -98,7 +99,7 @@ __global__ void spmm_kernel256_heavy(int *ptr, int *idx, float *val, float *vin,
     for (int i = begin + wid; i < end; i += 16) {
         int col = idx[i];
         float v = val[i];
-        float *Brow = vin + col * 256;
+        const float *Brow = vin + col * 256;
         acc0 += v * Brow[lid];
         acc1 += v * Brow[lid + 32];
         acc2 += v * Brow[lid + 64];
@@ -217,6 +218,24 @@ void SpMMOpt::preprocess(float *vin, float *vout)
             num_heavy_rows = 0;
         }
         if (num_heavy_rows > 0) {
+            // Sort heavy rows by a locality measure: first column index of each row
+            // This makes consecutive blocks access nearby B regions, reducing L2 thrash
+            std::vector<std::pair<int,int>> row_order;
+            row_order.reserve(num_heavy_rows);
+            std::vector<int> first_idx(num_heavy_rows);
+            for (int i = 0; i < num_heavy_rows; ++i) {
+                int r = heavy_rows[i];
+                int begin = h_ptr[r];
+                checkCudaErrors(cudaMemcpy(&first_idx[i], d_idx + begin, sizeof(int), cudaMemcpyDeviceToHost));
+                row_order.push_back({first_idx[i], i});
+            }
+            std::sort(row_order.begin(), row_order.end());
+            std::vector<int> sorted_heavy;
+            sorted_heavy.reserve(num_heavy_rows);
+            for (auto &p : row_order)
+                sorted_heavy.push_back(heavy_rows[p.second]);
+            heavy_rows.swap(sorted_heavy);
+
             checkCudaErrors(cudaMalloc2((void **)&d_light_rows, num_light_rows * sizeof(int)));
             checkCudaErrors(cudaMalloc2((void **)&d_heavy_rows, num_heavy_rows * sizeof(int)));
             checkCudaErrors(cudaMemcpy(d_light_rows, light_rows.data(), num_light_rows * sizeof(int), cudaMemcpyHostToDevice));
