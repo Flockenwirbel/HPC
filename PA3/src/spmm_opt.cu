@@ -146,16 +146,39 @@ __global__ void spmm_kernel256_heavy(int *ptr, int *idx, float *val, float *vin,
     }
 }
 
+__global__ void gather_first_idx_kernel(int *ptr, int *idx, int *rows, int *first, int num_rows) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+    int row = rows[tid];
+    first[tid] = idx[ptr[row]];
+}
+
+__global__ void spmm_clear_rows32(float *vout, int *rows, int num_rows) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows * 32) return;
+    int row = rows[tid >> 5];
+    int lid = tid & 31;
+    vout[row * 32 + lid] = 0.0f;
+}
+
+__global__ void spmm_clear_rows256(float *vout, int *rows, int num_rows) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows * 256) return;
+    int row = rows[tid >> 8];
+    int lid = tid & 255;
+    vout[row * 256 + lid] = 0.0f;
+}
+
 __global__ void spmm_kernel256_hub(int *ptr, int *idx, float *val, float *vin, float *vout, int *rows, int num_hubs) {
-    int hub_idx = blockIdx.x / 4;
-    int sub = blockIdx.x % 4;
+    int hub_idx = blockIdx.x >> 5;
+    int sub = blockIdx.x & 31;
     if (hub_idx >= num_hubs) return;
     int row = rows[hub_idx];
     int wid = threadIdx.x >> 5;
     int lid = threadIdx.x & 31;
     int begin = ptr[row], end = ptr[row + 1];
     int deg = end - begin;
-    int chunk = (deg + 3) / 4;
+    int chunk = (deg + 31) >> 5;
     int sub_begin = begin + sub * chunk;
     int sub_end = (sub_begin + chunk < end) ? sub_begin + chunk : end;
     if (sub_begin >= end) return;
@@ -305,7 +328,7 @@ void SpMMOpt::preprocess(float *vin, float *vout)
         light_rows.reserve(num_v);
         heavy_rows.reserve(num_v);
         hub_rows.reserve(num_v);
-        int heavy_threshold = (feat_in == 256) ? 128 : 256;
+        int heavy_threshold = (feat_in == 256) ? 16 : 256;
         int hub_threshold = 4096;
         for (int i = 0; i < num_v; ++i) {
             int deg = h_ptr[i + 1] - h_ptr[i];
@@ -330,10 +353,19 @@ void SpMMOpt::preprocess(float *vin, float *vout)
                 std::vector<std::pair<int,int>> order;
                 order.reserve(n);
                 std::vector<int> first(n);
-                for (int i = 0; i < n; ++i) {
-                    checkCudaErrors(cudaMemcpy(&first[i], d_idx + h_ptr[rows[i]], sizeof(int), cudaMemcpyDeviceToHost));
-                    order.push_back({first[i], i});
-                }
+
+                int *d_rows_tmp = nullptr;
+                int *d_first = nullptr;
+                checkCudaErrors(cudaMalloc((void **)&d_rows_tmp, n * sizeof(int)));
+                checkCudaErrors(cudaMalloc((void **)&d_first, n * sizeof(int)));
+                checkCudaErrors(cudaMemcpy(d_rows_tmp, rows.data(), n * sizeof(int), cudaMemcpyHostToDevice));
+                gather_first_idx_kernel<<<(n + 255) / 256, 256>>>(d_ptr, d_idx, d_rows_tmp, d_first, n);
+                checkCudaErrors(cudaGetLastError());
+                checkCudaErrors(cudaMemcpy(first.data(), d_first, n * sizeof(int), cudaMemcpyDeviceToHost));
+                checkCudaErrors(cudaFree(d_rows_tmp));
+                checkCudaErrors(cudaFree(d_first));
+
+                for (int i = 0; i < n; ++i) order.push_back({first[i], i});
                 std::sort(order.begin(), order.end());
                 std::vector<int> sorted;
                 sorted.reserve(n);
@@ -343,8 +375,10 @@ void SpMMOpt::preprocess(float *vin, float *vout)
             sort_by_first_idx(heavy_rows);
             sort_by_first_idx(hub_rows);
 
-            checkCudaErrors(cudaMalloc2((void **)&d_light_rows, num_light_rows * sizeof(int)));
-            checkCudaErrors(cudaMemcpy(d_light_rows, light_rows.data(), num_light_rows * sizeof(int), cudaMemcpyHostToDevice));
+            if (num_light_rows > 0) {
+                checkCudaErrors(cudaMalloc2((void **)&d_light_rows, num_light_rows * sizeof(int)));
+                checkCudaErrors(cudaMemcpy(d_light_rows, light_rows.data(), num_light_rows * sizeof(int), cudaMemcpyHostToDevice));
+            }
             if (num_heavy_rows > 0) {
                 checkCudaErrors(cudaMalloc2((void **)&d_heavy_rows, num_heavy_rows * sizeof(int)));
                 checkCudaErrors(cudaMemcpy(d_heavy_rows, heavy_rows.data(), num_heavy_rows * sizeof(int), cudaMemcpyHostToDevice));
@@ -361,21 +395,27 @@ void SpMMOpt::run(float *vin, float *vout)
 {
     if (feat_in == 32) {
         if (num_heavy_rows + num_hub_rows > 0) {
-            spmm_kernel32_rows<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
+            if (num_light_rows > 0)
+                spmm_kernel32_rows<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
             if (num_heavy_rows > 0)
                 spmm_kernel32_heavy<<<num_heavy_rows, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_heavy_rows);
-            if (num_hub_rows > 0)
+            if (num_hub_rows > 0) {
+                spmm_clear_rows32<<<(num_hub_rows * 32 + block.x - 1) / block.x, block>>>(vout, d_hub_rows, num_hub_rows);
                 spmm_kernel32_hub<<<num_hub_rows * 4, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_hub_rows, num_hub_rows);
+            }
         } else {
             spmm_kernel<<<grid, block>>>(d_ptr, d_idx, d_val, vin, vout, num_v, feat_in);
         }
     } else if (feat_in == 256) {
         if (num_heavy_rows + num_hub_rows > 0) {
-            spmm_kernel256_rows<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
+            if (num_light_rows > 0)
+                spmm_kernel256_rows<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
             if (num_heavy_rows > 0)
                 spmm_kernel256_heavy<<<num_heavy_rows, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_heavy_rows);
-            if (num_hub_rows > 0)
-                spmm_kernel256_hub<<<num_hub_rows * 4, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_hub_rows, num_hub_rows);
+            if (num_hub_rows > 0) {
+                spmm_clear_rows256<<<(num_hub_rows * 256 + block.x - 1) / block.x, block>>>(vout, d_hub_rows, num_hub_rows);
+                spmm_kernel256_hub<<<num_hub_rows * 32, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_hub_rows, num_hub_rows);
+            }
         } else {
             spmm_kernel<<<grid, block>>>(d_ptr, d_idx, d_val, vin, vout, num_v, feat_in);
         }
