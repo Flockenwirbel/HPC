@@ -9,6 +9,7 @@ public:
     SpMMOpt(CSR *g, int out_feat_in) : SpMM(g, out_feat_in) {}
     ~SpMMOpt() {
         if (d_light_rows) checkCudaErrors(cudaFree(d_light_rows));
+        if (d_low_rows) checkCudaErrors(cudaFree(d_low_rows));
         if (d_heavy_rows) checkCudaErrors(cudaFree(d_heavy_rows));
         if (d_hub_rows) checkCudaErrors(cudaFree(d_hub_rows));
     }
@@ -19,9 +20,11 @@ public:
 
 private:
     int *d_light_rows = nullptr;
+    int *d_low_rows = nullptr;
     int *d_heavy_rows = nullptr;
     int *d_hub_rows = nullptr;
     int num_light_rows = 0;
+    int num_low_rows = 0;
     int num_heavy_rows = 0;
     int num_hub_rows = 0;
 };

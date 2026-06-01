@@ -19,18 +19,62 @@ __global__ void spmm_kernel_placeholder(int *ptr, int *idx, float *val, float *v
     }
 }
 
+__global__ void spmm_kernel32_low4(int *ptr, int *idx, float *val, float *vin, float *vout, int *rows, int num_rows) {
+    int wid = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lid = threadIdx.x & 31;
+    int slot = lid >> 3;
+    int q = lid & 7;
+    int rid = wid * 4 + slot;
+    if (rid >= num_rows) return;
+
+    int row = rows[rid];
+    int begin = ptr[row], end = ptr[row + 1];
+    float4 acc = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const float4 *vin4 = reinterpret_cast<const float4 *>(vin);
+    for (int i = begin; i < end; ++i) {
+        float v = val[i];
+        float4 x = vin4[idx[i] * 8 + q];
+        acc.x += v * x.x;
+        acc.y += v * x.y;
+        acc.z += v * x.z;
+        acc.w += v * x.w;
+    }
+    reinterpret_cast<float4 *>(vout)[row * 8 + q] = acc;
+}
+
 __global__ void spmm_kernel32_rows(int *ptr, int *idx, float *val, float *vin, float *vout, int *rows, int num_rows) {
     int wid = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
     int lid = threadIdx.x & 31;
     if (wid >= num_rows) return;
 
     int row = rows[wid];
+    int part = lid >> 3;
+    int q = lid & 7;
     int begin = ptr[row], end = ptr[row + 1];
-    float acc = 0.0f;
-    for (int i = begin; i < end; ++i) {
-        acc += val[i] * vin[idx[i] * 32 + lid];
+    float4 acc = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const float4 *vin4 = reinterpret_cast<const float4 *>(vin);
+    for (int i = begin + part; i < end; i += 4) {
+        float v = val[i];
+        float4 x = vin4[idx[i] * 8 + q];
+        acc.x += v * x.x;
+        acc.y += v * x.y;
+        acc.z += v * x.z;
+        acc.w += v * x.w;
     }
-    vout[row * 32 + lid] = acc;
+
+    unsigned mask = 0xffffffffu;
+    float x = acc.x, y = acc.y, z = acc.z, w = acc.w;
+    x += __shfl_down_sync(mask, x, 16);
+    y += __shfl_down_sync(mask, y, 16);
+    z += __shfl_down_sync(mask, z, 16);
+    w += __shfl_down_sync(mask, w, 16);
+    x += __shfl_down_sync(mask, x, 8);
+    y += __shfl_down_sync(mask, y, 8);
+    z += __shfl_down_sync(mask, z, 8);
+    w += __shfl_down_sync(mask, w, 8);
+    if (lid < 8) {
+        reinterpret_cast<float4 *>(vout)[row * 8 + q] = make_float4(x, y, z, w);
+    }
 }
 
 __global__ void spmm_kernel32_heavy(int *ptr, int *idx, float *val, float *vin, float *vout, int *rows) {
@@ -237,15 +281,15 @@ __global__ void spmm_kernel256_hub(int *ptr, int *idx, float *val, float *vin, f
 }
 
 __global__ void spmm_kernel32_hub(int *ptr, int *idx, float *val, float *vin, float *vout, int *rows, int num_hubs) {
-    int hub_idx = blockIdx.x / 4;
-    int sub = blockIdx.x % 4;
+    int hub_idx = blockIdx.x >> 4;
+    int sub = blockIdx.x & 15;
     if (hub_idx >= num_hubs) return;
     int row = rows[hub_idx];
     int wid = threadIdx.x >> 5;
     int lid = threadIdx.x & 31;
     int begin = ptr[row], end = ptr[row + 1];
     int deg = end - begin;
-    int chunk = (deg + 3) / 4;
+    int chunk = (deg + 15) >> 4;
     int sub_begin = begin + sub * chunk;
     int sub_end = (sub_begin + chunk < end) ? sub_begin + chunk : end;
     if (sub_begin >= end) return;
@@ -314,9 +358,11 @@ void SpMMOpt::preprocess(float *vin, float *vout)
     grid.x = (num_v * 32 + block.x - 1) / block.x;
 
     num_light_rows = num_v;
+    num_low_rows = 0;
     num_heavy_rows = 0;
     num_hub_rows = 0;
     d_light_rows = nullptr;
+    d_low_rows = nullptr;
     d_heavy_rows = nullptr;
     d_hub_rows = nullptr;
 
@@ -324,28 +370,49 @@ void SpMMOpt::preprocess(float *vin, float *vout)
         std::vector<int> h_ptr(num_v + 1);
         checkCudaErrors(cudaMemcpy(h_ptr.data(), d_ptr, (num_v + 1) * sizeof(int), cudaMemcpyDeviceToHost));
 
-        std::vector<int> light_rows, heavy_rows, hub_rows;
+        int max_deg = 0;
+        for (int i = 0; i < num_v; ++i) {
+            max_deg = std::max(max_deg, h_ptr[i + 1] - h_ptr[i]);
+        }
+        float avg_deg = (num_v > 0) ? (float)num_e / (float)num_v : 0.0f;
+
+        int heavy_threshold = 16;
+        int hub_threshold = 4096;
+        int low_threshold = -1;
+        bool sort_light_rows = false;
+        if (feat_in == 32) {
+            low_threshold = 8;
+            heavy_threshold = max_deg;  // K=32 uses split4 light rows plus hub rows; no separate heavy rows.
+            if (avg_deg < 10.0f && max_deg > 8192) hub_threshold = 1024;
+            else if (avg_deg > 100.0f && max_deg > 16000) hub_threshold = 32768;
+            else hub_threshold = 8192;
+            sort_light_rows = !(avg_deg > 400.0f && max_deg < 8192);
+        }
+
+        std::vector<int> low_rows, light_rows, heavy_rows, hub_rows;
+        low_rows.reserve(num_v);
         light_rows.reserve(num_v);
         heavy_rows.reserve(num_v);
         hub_rows.reserve(num_v);
-        int heavy_threshold = (feat_in == 256) ? 16 : 256;
-        int hub_threshold = 4096;
         for (int i = 0; i < num_v; ++i) {
             int deg = h_ptr[i + 1] - h_ptr[i];
             if (deg > hub_threshold) hub_rows.push_back(i);
             else if (deg > heavy_threshold) heavy_rows.push_back(i);
+            else if (feat_in == 32 && deg <= low_threshold) low_rows.push_back(i);
             else light_rows.push_back(i);
         }
 
+        num_low_rows = (int)low_rows.size();
         num_light_rows = (int)light_rows.size();
         num_heavy_rows = (int)heavy_rows.size();
         num_hub_rows = (int)hub_rows.size();
-        if (num_heavy_rows + num_hub_rows < 128) {
+        if (num_low_rows + num_heavy_rows + num_hub_rows < 128) {
+            num_low_rows = 0;
             num_light_rows = num_v;
             num_heavy_rows = 0;
             num_hub_rows = 0;
         }
-        if (num_heavy_rows + num_hub_rows > 0) {
+        if (num_low_rows + num_heavy_rows + num_hub_rows > 0) {
             // Sort heavy rows by first column index for L2 locality
             auto sort_by_first_idx = [&](std::vector<int> &rows) {
                 if (rows.empty()) return;
@@ -372,9 +439,14 @@ void SpMMOpt::preprocess(float *vin, float *vout)
                 for (auto &p : order) sorted.push_back(rows[p.second]);
                 rows.swap(sorted);
             };
+            if (sort_light_rows) sort_by_first_idx(light_rows);
             sort_by_first_idx(heavy_rows);
             sort_by_first_idx(hub_rows);
 
+            if (num_low_rows > 0) {
+                checkCudaErrors(cudaMalloc2((void **)&d_low_rows, num_low_rows * sizeof(int)));
+                checkCudaErrors(cudaMemcpy(d_low_rows, low_rows.data(), num_low_rows * sizeof(int), cudaMemcpyHostToDevice));
+            }
             if (num_light_rows > 0) {
                 checkCudaErrors(cudaMalloc2((void **)&d_light_rows, num_light_rows * sizeof(int)));
                 checkCudaErrors(cudaMemcpy(d_light_rows, light_rows.data(), num_light_rows * sizeof(int), cudaMemcpyHostToDevice));
@@ -394,14 +466,16 @@ void SpMMOpt::preprocess(float *vin, float *vout)
 void SpMMOpt::run(float *vin, float *vout)
 {
     if (feat_in == 32) {
-        if (num_heavy_rows + num_hub_rows > 0) {
+        if (num_low_rows + num_heavy_rows + num_hub_rows > 0) {
+            if (num_low_rows > 0)
+                spmm_kernel32_low4<<<(((num_low_rows + 3) / 4) * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_low_rows, num_low_rows);
             if (num_light_rows > 0)
                 spmm_kernel32_rows<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
             if (num_heavy_rows > 0)
                 spmm_kernel32_heavy<<<num_heavy_rows, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_heavy_rows);
             if (num_hub_rows > 0) {
                 spmm_clear_rows32<<<(num_hub_rows * 32 + block.x - 1) / block.x, block>>>(vout, d_hub_rows, num_hub_rows);
-                spmm_kernel32_hub<<<num_hub_rows * 4, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_hub_rows, num_hub_rows);
+                spmm_kernel32_hub<<<num_hub_rows * 16, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_hub_rows, num_hub_rows);
             }
         } else {
             spmm_kernel<<<grid, block>>>(d_ptr, d_idx, d_val, vin, vout, num_v, feat_in);
