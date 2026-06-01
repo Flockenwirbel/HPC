@@ -77,6 +77,120 @@ __global__ void spmm_kernel32_rows(int *ptr, int *idx, float *val, float *vin, f
     }
 }
 
+
+__global__ void spmm_kernel32_rows8(int *ptr, int *idx, float *val, float *vin, float *vout, int *rows, int num_rows) {
+    int wid = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lid = threadIdx.x & 31;
+    if (wid >= num_rows) return;
+
+    int row = rows[wid];
+    int part = lid >> 2;
+    int q = lid & 3;
+    int begin = ptr[row], end = ptr[row + 1];
+    float4 acc0 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 acc1 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const float4 *vin4 = reinterpret_cast<const float4 *>(vin);
+    for (int i = begin + part; i < end; i += 8) {
+        float v = val[i];
+        const float4 *Brow = vin4 + idx[i] * 8;
+        float4 x0 = Brow[q];
+        float4 x1 = Brow[q + 4];
+        acc0.x += v * x0.x;
+        acc0.y += v * x0.y;
+        acc0.z += v * x0.z;
+        acc0.w += v * x0.w;
+        acc1.x += v * x1.x;
+        acc1.y += v * x1.y;
+        acc1.z += v * x1.z;
+        acc1.w += v * x1.w;
+    }
+
+    unsigned mask = 0xffffffffu;
+    float x0 = acc0.x, y0 = acc0.y, z0 = acc0.z, w0 = acc0.w;
+    float x1 = acc1.x, y1 = acc1.y, z1 = acc1.z, w1 = acc1.w;
+    x0 += __shfl_down_sync(mask, x0, 16);
+    y0 += __shfl_down_sync(mask, y0, 16);
+    z0 += __shfl_down_sync(mask, z0, 16);
+    w0 += __shfl_down_sync(mask, w0, 16);
+    x1 += __shfl_down_sync(mask, x1, 16);
+    y1 += __shfl_down_sync(mask, y1, 16);
+    z1 += __shfl_down_sync(mask, z1, 16);
+    w1 += __shfl_down_sync(mask, w1, 16);
+    x0 += __shfl_down_sync(mask, x0, 8);
+    y0 += __shfl_down_sync(mask, y0, 8);
+    z0 += __shfl_down_sync(mask, z0, 8);
+    w0 += __shfl_down_sync(mask, w0, 8);
+    x1 += __shfl_down_sync(mask, x1, 8);
+    y1 += __shfl_down_sync(mask, y1, 8);
+    z1 += __shfl_down_sync(mask, z1, 8);
+    w1 += __shfl_down_sync(mask, w1, 8);
+    x0 += __shfl_down_sync(mask, x0, 4);
+    y0 += __shfl_down_sync(mask, y0, 4);
+    z0 += __shfl_down_sync(mask, z0, 4);
+    w0 += __shfl_down_sync(mask, w0, 4);
+    x1 += __shfl_down_sync(mask, x1, 4);
+    y1 += __shfl_down_sync(mask, y1, 4);
+    z1 += __shfl_down_sync(mask, z1, 4);
+    w1 += __shfl_down_sync(mask, w1, 4);
+    if (lid < 4) {
+        float4 *out4 = reinterpret_cast<float4 *>(vout) + row * 8;
+        out4[q] = make_float4(x0, y0, z0, w0);
+        out4[q + 4] = make_float4(x1, y1, z1, w1);
+    }
+}
+
+__global__ void spmm_kernel32_rows16(int *ptr, int *idx, float *val, float *vin, float *vout, int *rows, int num_rows) {
+    int wid = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    int lid = threadIdx.x & 31;
+    if (wid >= num_rows) return;
+
+    int row = rows[wid];
+    int part = lid >> 1;
+    int q = lid & 1;
+    int begin = ptr[row], end = ptr[row + 1];
+    float4 acc0 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 acc1 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 acc2 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float4 acc3 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    const float4 *vin4 = reinterpret_cast<const float4 *>(vin);
+    for (int i = begin + part; i < end; i += 16) {
+        float v = val[i];
+        const float4 *Brow = vin4 + idx[i] * 8;
+        float4 x0 = Brow[q];
+        float4 x1 = Brow[q + 2];
+        float4 x2 = Brow[q + 4];
+        float4 x3 = Brow[q + 6];
+        acc0.x += v * x0.x; acc0.y += v * x0.y; acc0.z += v * x0.z; acc0.w += v * x0.w;
+        acc1.x += v * x1.x; acc1.y += v * x1.y; acc1.z += v * x1.z; acc1.w += v * x1.w;
+        acc2.x += v * x2.x; acc2.y += v * x2.y; acc2.z += v * x2.z; acc2.w += v * x2.w;
+        acc3.x += v * x3.x; acc3.y += v * x3.y; acc3.z += v * x3.z; acc3.w += v * x3.w;
+    }
+
+    unsigned mask = 0xffffffffu;
+    float x0 = acc0.x, y0 = acc0.y, z0 = acc0.z, w0 = acc0.w;
+    float x1 = acc1.x, y1 = acc1.y, z1 = acc1.z, w1 = acc1.w;
+    float x2 = acc2.x, y2 = acc2.y, z2 = acc2.z, w2 = acc2.w;
+    float x3 = acc3.x, y3 = acc3.y, z3 = acc3.z, w3 = acc3.w;
+#define REDUCE_K32_SPLIT16(off) \
+    x0 += __shfl_down_sync(mask, x0, off); y0 += __shfl_down_sync(mask, y0, off); z0 += __shfl_down_sync(mask, z0, off); w0 += __shfl_down_sync(mask, w0, off); \
+    x1 += __shfl_down_sync(mask, x1, off); y1 += __shfl_down_sync(mask, y1, off); z1 += __shfl_down_sync(mask, z1, off); w1 += __shfl_down_sync(mask, w1, off); \
+    x2 += __shfl_down_sync(mask, x2, off); y2 += __shfl_down_sync(mask, y2, off); z2 += __shfl_down_sync(mask, z2, off); w2 += __shfl_down_sync(mask, w2, off); \
+    x3 += __shfl_down_sync(mask, x3, off); y3 += __shfl_down_sync(mask, y3, off); z3 += __shfl_down_sync(mask, z3, off); w3 += __shfl_down_sync(mask, w3, off)
+    REDUCE_K32_SPLIT16(16);
+    REDUCE_K32_SPLIT16(8);
+    REDUCE_K32_SPLIT16(4);
+    REDUCE_K32_SPLIT16(2);
+#undef REDUCE_K32_SPLIT16
+
+    if (lid < 2) {
+        float4 *out4 = reinterpret_cast<float4 *>(vout) + row * 8;
+        out4[q] = make_float4(x0, y0, z0, w0);
+        out4[q + 2] = make_float4(x1, y1, z1, w1);
+        out4[q + 4] = make_float4(x2, y2, z2, w2);
+        out4[q + 6] = make_float4(x3, y3, z3, w3);
+    }
+}
+
 __global__ void spmm_kernel32_heavy(int *ptr, int *idx, float *val, float *vin, float *vout, int *rows) {
     int row = rows[blockIdx.x];
     int wid = threadIdx.x >> 5;
@@ -365,6 +479,8 @@ void SpMMOpt::preprocess(float *vin, float *vout)
     d_low_rows = nullptr;
     d_heavy_rows = nullptr;
     d_hub_rows = nullptr;
+    use_split8_rows = false;
+    use_split16_rows = false;
 
     if (feat_in == 32 || feat_in == 256) {
         std::vector<int> h_ptr(num_v + 1);
@@ -386,7 +502,10 @@ void SpMMOpt::preprocess(float *vin, float *vout)
             if (avg_deg < 10.0f && max_deg > 8192) hub_threshold = 1024;
             else if (avg_deg > 100.0f && max_deg > 16000) hub_threshold = 32768;
             else hub_threshold = 8192;
+            if (avg_deg > 8.0f && avg_deg < 20.0f && max_deg < 4096) low_threshold = 16;
             sort_light_rows = !(avg_deg > 400.0f && max_deg < 8192);
+            use_split8_rows = (avg_deg < 8.0f) || (max_deg < 1000) || (avg_deg > 400.0f && max_deg < 8192);
+            use_split16_rows = (avg_deg < 8.0f && max_deg > 10000 && max_deg < 20000);
         }
 
         std::vector<int> low_rows, light_rows, heavy_rows, hub_rows;
@@ -469,8 +588,14 @@ void SpMMOpt::run(float *vin, float *vout)
         if (num_low_rows + num_heavy_rows + num_hub_rows > 0) {
             if (num_low_rows > 0)
                 spmm_kernel32_low4<<<(((num_low_rows + 3) / 4) * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_low_rows, num_low_rows);
-            if (num_light_rows > 0)
-                spmm_kernel32_rows<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
+            if (num_light_rows > 0) {
+                if (use_split16_rows)
+                    spmm_kernel32_rows16<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
+                else if (use_split8_rows)
+                    spmm_kernel32_rows8<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
+                else
+                    spmm_kernel32_rows<<<(num_light_rows * 32 + block.x - 1) / block.x, block>>>(d_ptr, d_idx, d_val, vin, vout, d_light_rows, num_light_rows);
+            }
             if (num_heavy_rows > 0)
                 spmm_kernel32_heavy<<<num_heavy_rows, 512>>>(d_ptr, d_idx, d_val, vin, vout, d_heavy_rows);
             if (num_hub_rows > 0) {

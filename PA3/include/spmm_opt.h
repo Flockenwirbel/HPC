@@ -27,5 +27,7 @@ private:
     int num_low_rows = 0;
     int num_heavy_rows = 0;
     int num_hub_rows = 0;
+    bool use_split8_rows = false;
+    bool use_split16_rows = false;
 };
 #endif

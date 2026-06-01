@@ -1,0 +1,83 @@
+v6: adaptive split8/split16 + light-sort + low16-for-mid graphs (K=32), K=256 same as v5
+
+=== K=256 ===
+DATASET arxiv
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.00299264 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00258279 (double)
+DATASET collab
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0052024 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00438154 (double)
+DATASET citation
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0788776 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0659029 (double)
+DATASET ddi
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.00155318 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00168004 (double)
+DATASET protein
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0808349 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.10328 (double)
+DATASET ppa
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0848866 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.060925 (double)
+DATASET reddit.dgl
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.202326 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.1542 (double)
+DATASET products
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.258348 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.177415 (double)
+DATASET youtube
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0144059 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0119909 (double)
+DATASET amazon_cogdl
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.517023 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.425491 (double)
+DATASET yelp
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0299855 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0281355 (double)
+DATASET wikikg2
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0166464 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0147656 (double)
+DATASET am
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0133985 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0104939 (double)
+
+=== K=32 ===
+DATASET arxiv
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.000731657 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.000351153 (double)
+DATASET collab
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.00127042 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.000551928 (double)
+DATASET citation
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0164459 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00898756 (double)
+DATASET ddi
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.000640429 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.000249716 (double)
+DATASET protein
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.024652 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0073712 (double)
+DATASET ppa
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0183565 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00823678 (double)
+DATASET reddit.dgl
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0485616 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0160243 (double)
+DATASET products
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.0558273 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0247057 (double)
+DATASET youtube
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.00364212 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00159251 (double)
+DATASET amazon_cogdl
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.125317 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.0451195 (double)
+DATASET yelp
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.00657501 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00340041 (double)
+DATASET wikikg2
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.00714033 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00247816 (double)
+DATASET am
+[..A3/test/test_spmm.cu:62 (TestBody)] time = 0.00374211 (double)
+[..A3/test/test_spmm.cu:71 (TestBody)] time = 0.00169004 (double)
