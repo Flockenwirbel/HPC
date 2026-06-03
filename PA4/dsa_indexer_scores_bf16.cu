@@ -126,7 +126,13 @@ __global__ void dsa_indexer_scores_page64_kernel(
         const int64_t page_start = logical_page * kOfficialPageSize;
         const int32_t visible = context_lens[b];
 
-        if (page_start < (int64_t)visible) {
+        const __nv_bfloat16 neg_inf = __float2bfloat16(-INFINITY);
+
+        if (page_start >= (int64_t)visible) {
+            if (tid < kOfficialPageSize) {
+                scores[b * max_seq_len + page_start + tid] = neg_inf;
+            }
+        } else {
             const int64_t remaining = (int64_t)visible - page_start;
             const int valid_count = remaining < kOfficialPageSize ? (int)remaining : kOfficialPageSize;
             const int32_t physical_page = block_table[b * MaxPages + logical_page];
@@ -170,16 +176,20 @@ __global__ void dsa_indexer_scores_page64_kernel(
 
             __syncthreads();
 
-            if (tid < kOfficialPageSize && tid < valid_count) {
-                float acc = 0.0f;
-                #pragma unroll
-                for (int head = 0; head < kOfficialHidx; ++head) {
-                    const float dot = dot_shared[head * kOfficialPageSize + tid];
-                    if (dot > 0.0f) {
-                        acc = fmaf(__bfloat162float(w_idx[w_base + head]), dot, acc);
+            if (tid < kOfficialPageSize) {
+                if (tid < valid_count) {
+                    float acc = 0.0f;
+                    #pragma unroll
+                    for (int head = 0; head < kOfficialHidx; ++head) {
+                        const float dot = dot_shared[head * kOfficialPageSize + tid];
+                        if (dot > 0.0f) {
+                            acc = fmaf(__bfloat162float(w_idx[w_base + head]), dot, acc);
+                        }
                     }
+                    scores[b * max_seq_len + page_start + tid] = __float2bfloat16(acc);
+                } else {
+                    scores[b * max_seq_len + page_start + tid] = neg_inf;
                 }
-                scores[b * max_seq_len + page_start + tid] = __float2bfloat16(acc);
             }
         }
 
@@ -208,12 +218,6 @@ extern "C" void run_kernel(
         return;
     }
 
-    int64_t fill_blocks64 = (total_scores + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    if (fill_blocks64 > 65535) {
-        fill_blocks64 = 65535;
-    }
-    fill_neg_inf_kernel<<<(int)fill_blocks64, kThreadsPerBlock>>>(scores, total_scores);
-
     if (Hidx == kOfficialHidx && Didx == kOfficialDidx && PageSize == kOfficialPageSize) {
         int64_t page_blocks64 = B * MaxPages;
         if (page_blocks64 > 65535) {
@@ -231,6 +235,12 @@ extern "C" void run_kernel(
         );
         return;
     }
+
+    int64_t fill_blocks64 = (total_scores + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    if (fill_blocks64 > 65535) {
+        fill_blocks64 = 65535;
+    }
+    fill_neg_inf_kernel<<<(int)fill_blocks64, kThreadsPerBlock>>>(scores, total_scores);
 
     int64_t page_blocks64 = B * MaxPages;
     if (page_blocks64 > 65535) {
