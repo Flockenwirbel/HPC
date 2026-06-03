@@ -5,17 +5,18 @@ import triton.language as tl
 OFFICIAL_HIDX = 64
 OFFICIAL_DIDX = 128
 OFFICIAL_PAGE_SIZE = 64
-SMALL_TOTAL_PAGES_THRESHOLD = 256
+SMALL_TOTAL_PAGES_THRESHOLD = 2048
 
 
 @triton.jit
-def _dsa_indexer_scores_page_full_kernel(
+def _dsa_indexer_scores_small_full_kernel(
     q_idx_ptr,
     k_idx_cache_ptr,
     w_idx_ptr,
     block_table_ptr,
     context_lens_ptr,
     scores_ptr,
+    total_pages,
     max_pages,
     max_seq_len,
     HIDX: tl.constexpr,
@@ -62,16 +63,17 @@ def _dsa_indexer_scores_page_full_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_N": 64}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 64}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_N": 32}, num_warps=4, num_stages=2),
-        triton.Config({"BLOCK_N": 32}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 16}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=3),
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=8, num_stages=3),
+        triton.Config({}, num_warps=16, num_stages=2),
+        triton.Config({}, num_warps=16, num_stages=3),
     ],
     key=["total_pages", "max_pages"],
 )
 @triton.jit
-def _dsa_indexer_scores_page_split_kernel(
+def _dsa_indexer_scores_large_full_kernel(
     q_idx_ptr,
     k_idx_cache_ptr,
     w_idx_ptr,
@@ -84,17 +86,15 @@ def _dsa_indexer_scores_page_split_kernel(
     HIDX: tl.constexpr,
     DIDX: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
-    BLOCK_N: tl.constexpr,
 ):
     pid_page = tl.program_id(axis=0)
-    pid_block = tl.program_id(axis=1)
 
     b = pid_page // max_pages
     logical_page = pid_page - b * max_pages
     page_start = logical_page * PAGE_SIZE
 
     offs_h = tl.arange(0, HIDX)
-    offs_n = pid_block * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_n = tl.arange(0, PAGE_SIZE)
 
     visible = tl.load(context_lens_ptr + b)
     token_global = page_start + offs_n
@@ -123,11 +123,11 @@ def _dsa_indexer_scores_page_split_kernel(
         base=k_idx_cache_ptr + physical_page * PAGE_SIZE * DIDX,
         shape=(PAGE_SIZE, DIDX),
         strides=(DIDX, 1),
-        offsets=(pid_block * BLOCK_N, 0),
-        block_shape=(BLOCK_N, DIDX),
+        offsets=(0, 0),
+        block_shape=(PAGE_SIZE, DIDX),
         order=(1, 0),
     )
-    k = tl.load(k_block_ptr, boundary_check=(0,), padding_option="zero")
+    k = tl.load(k_block_ptr)
 
     dots = tl.dot(q, tl.trans(k), out_dtype=tl.float32)
     dots = tl.maximum(dots, 0.0)
@@ -135,7 +135,7 @@ def _dsa_indexer_scores_page_split_kernel(
     out = tl.where(token_valid, scores_block, float("-inf"))
 
     score_ptrs = scores_ptr + b * max_seq_len + token_global
-    tl.store(score_ptrs, out.to(tl.bfloat16), mask=offs_n < PAGE_SIZE)
+    tl.store(score_ptrs, out.to(tl.bfloat16))
 
 
 def run_kernel(
@@ -161,16 +161,17 @@ def run_kernel(
         return
 
     total_pages = B * MaxPages
+    grid = (total_pages,)
 
     if total_pages <= SMALL_TOTAL_PAGES_THRESHOLD:
-        grid = (total_pages,)
-        _dsa_indexer_scores_page_full_kernel[grid](
+        _dsa_indexer_scores_small_full_kernel[grid](
             q_idx,
             k_idx_cache,
             w_idx,
             block_table,
             context_lens,
             scores,
+            total_pages,
             MaxPages,
             max_seq_len,
             HIDX=64,
@@ -181,8 +182,7 @@ def run_kernel(
         )
         return
 
-    grid = lambda meta: (total_pages, triton.cdiv(OFFICIAL_PAGE_SIZE, meta["BLOCK_N"]))
-    _dsa_indexer_scores_page_split_kernel[grid](
+    _dsa_indexer_scores_large_full_kernel[grid](
         q_idx,
         k_idx_cache,
         w_idx,
