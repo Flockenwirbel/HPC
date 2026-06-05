@@ -25,6 +25,14 @@ __device__ __forceinline__ float warp_reduce_sum(float value) {
     return value;
 }
 
+__device__ __forceinline__ float quad_group_reduce_sum(float value) {
+    unsigned mask = 0xffffffffu;
+    value += __shfl_down_sync(mask, value, 16);
+    value += __shfl_down_sync(mask, value, 8);
+    value += __shfl_down_sync(mask, value, 4);
+    return value;
+}
+
 __global__ void fill_neg_inf_kernel(
     __nv_bfloat16* __restrict__ scores,
     int64_t total
@@ -110,14 +118,14 @@ __global__ void dsa_indexer_scores_page64_kernel(
     int64_t MaxPages
 ) {
     const int tid = threadIdx.x;
+    const int lane = tid & 31;
     const int warp = tid >> 5;
     const int64_t total_pages = B * MaxPages;
     const int64_t max_seq_len = MaxPages * (int64_t)kOfficialPageSize;
 
-    __shared__ uint4 q_shared_vec[kOfficialSharedVecCount];
     __shared__ uint4 k_shared_vec[kOfficialSharedVecCount];
-    __shared__ float dot_shared[kOfficialHidx * kOfficialPageSize];
-    __nv_bfloat16* q_shared = reinterpret_cast<__nv_bfloat16*>(q_shared_vec);
+    __shared__ float partial_shared[4 * kOfficialPageSize];
+    __shared__ float w_shared[kOfficialHidx];
     __nv_bfloat16* k_shared = reinterpret_cast<__nv_bfloat16*>(k_shared_vec);
 
     for (int64_t page_linear = blockIdx.x; page_linear < total_pages; page_linear += gridDim.x) {
@@ -138,12 +146,10 @@ __global__ void dsa_indexer_scores_page64_kernel(
             const int32_t physical_page = block_table[b * MaxPages + logical_page];
 
             const int64_t q_base = b * (int64_t)kOfficialHidx * kOfficialDidx;
-            const uint4* q_global_vec = reinterpret_cast<const uint4*>(q_idx + q_base);
-            for (int idx = tid; idx < kOfficialSharedVecCount; idx += blockDim.x) {
-                q_shared_vec[idx] = q_global_vec[idx];
-            }
-
             const int64_t w_base = b * (int64_t)kOfficialHidx;
+            if (tid < kOfficialHidx) {
+                w_shared[tid] = __bfloat162float(w_idx[w_base + tid]);
+            }
 
             const int64_t k_base = (int64_t)physical_page * kOfficialPageSize * kOfficialDidx;
             const uint4* k_global_vec = reinterpret_cast<const uint4*>(k_idx_cache + k_base);
@@ -163,29 +169,51 @@ __global__ void dsa_indexer_scores_page64_kernel(
 
                 #pragma unroll
                 for (int k_tile = 0; k_tile < 8; ++k_tile) {
-                    const __nv_bfloat16* a_ptr = q_shared + (m_tile * 16) * kOfficialDidx + k_tile * 16;
+                    const __nv_bfloat16* a_ptr = q_idx + q_base + (m_tile * 16) * kOfficialDidx + k_tile * 16;
                     const __nv_bfloat16* b_ptr = k_shared + (n_tile * 16) * kOfficialDidx + k_tile * 16;
                     nvcuda::wmma::load_matrix_sync(a_frag, a_ptr, kOfficialDidx);
                     nvcuda::wmma::load_matrix_sync(b_frag, b_ptr, kOfficialDidx);
                     nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                 }
 
-                float* c_ptr = dot_shared + (m_tile * 16) * kOfficialPageSize + n_tile * 16;
-                nvcuda::wmma::store_matrix_sync(c_ptr, c_frag, kOfficialPageSize, nvcuda::wmma::mem_row_major);
+                const int group = lane >> 2;
+                const int quad = lane & 3;
+                const float w0 = w_shared[m_tile * 16 + group];
+                const float w1 = w_shared[m_tile * 16 + group + 8];
+
+                float p0 = 0.0f;
+                float p1 = 0.0f;
+                float p2 = 0.0f;
+                float p3 = 0.0f;
+                if (c_frag.x[0] > 0.0f) p0 = c_frag.x[0] * w0;
+                if (c_frag.x[1] > 0.0f) p1 = c_frag.x[1] * w0;
+                if (c_frag.x[2] > 0.0f) p0 = fmaf(c_frag.x[2], w1, p0);
+                if (c_frag.x[3] > 0.0f) p1 = fmaf(c_frag.x[3], w1, p1);
+                if (c_frag.x[4] > 0.0f) p2 = c_frag.x[4] * w0;
+                if (c_frag.x[5] > 0.0f) p3 = c_frag.x[5] * w0;
+                if (c_frag.x[6] > 0.0f) p2 = fmaf(c_frag.x[6], w1, p2);
+                if (c_frag.x[7] > 0.0f) p3 = fmaf(c_frag.x[7], w1, p3);
+
+                p0 = quad_group_reduce_sum(p0);
+                p1 = quad_group_reduce_sum(p1);
+                p2 = quad_group_reduce_sum(p2);
+                p3 = quad_group_reduce_sum(p3);
+                if (group == 0) {
+                    partial_shared[m_tile * kOfficialPageSize + n_tile * 16 + quad * 2] = p0;
+                    partial_shared[m_tile * kOfficialPageSize + n_tile * 16 + quad * 2 + 1] = p1;
+                    partial_shared[m_tile * kOfficialPageSize + n_tile * 16 + quad * 2 + 8] = p2;
+                    partial_shared[m_tile * kOfficialPageSize + n_tile * 16 + quad * 2 + 9] = p3;
+                }
             }
 
             __syncthreads();
 
             if (tid < kOfficialPageSize) {
                 if (tid < valid_count) {
-                    float acc = 0.0f;
-                    #pragma unroll
-                    for (int head = 0; head < kOfficialHidx; ++head) {
-                        const float dot = dot_shared[head * kOfficialPageSize + tid];
-                        if (dot > 0.0f) {
-                            acc = fmaf(__bfloat162float(w_idx[w_base + head]), dot, acc);
-                        }
-                    }
+                    float acc = partial_shared[tid];
+                    acc += partial_shared[kOfficialPageSize + tid];
+                    acc += partial_shared[2 * kOfficialPageSize + tid];
+                    acc += partial_shared[3 * kOfficialPageSize + tid];
                     scores[b * max_seq_len + page_start + tid] = __float2bfloat16(acc);
                 } else {
                     scores[b * max_seq_len + page_start + tid] = neg_inf;
@@ -196,6 +224,169 @@ __global__ void dsa_indexer_scores_page64_kernel(
         __syncthreads();
     }
 }
+
+
+__global__ void dsa_indexer_scores_page64_group4_parallel_kernel(
+    const __nv_bfloat16* __restrict__ q_idx,
+    const __nv_bfloat16* __restrict__ k_idx_cache,
+    const __nv_bfloat16* __restrict__ w_idx,
+    const int32_t* __restrict__ block_table,
+    const int32_t* __restrict__ context_lens,
+    __nv_bfloat16* __restrict__ scores,
+    int64_t B,
+    int64_t MaxPages
+) {
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int page_slot = warp >> 2;
+    const int n_tile = warp & 3;
+    const int64_t groups_per_batch = (MaxPages + 3) >> 2;
+    const int64_t total_groups = B * groups_per_batch;
+    const int64_t max_seq_len = MaxPages * (int64_t)kOfficialPageSize;
+    const __nv_bfloat16 neg_inf = __float2bfloat16(-INFINITY);
+
+    __shared__ uint4 q_shared_vec[kOfficialSharedVecCount];
+    __shared__ float w_shared[kOfficialHidx];
+    __nv_bfloat16* q_shared = reinterpret_cast<__nv_bfloat16*>(q_shared_vec);
+
+    for (int64_t group_linear = blockIdx.x; group_linear < total_groups; group_linear += gridDim.x) {
+        const int64_t b = group_linear / groups_per_batch;
+        const int64_t group_in_batch = group_linear - b * groups_per_batch;
+        const int64_t first_logical_page = group_in_batch << 2;
+        const int32_t visible = context_lens[b];
+
+        if (first_logical_page * (int64_t)kOfficialPageSize >= (int64_t)visible) {
+            if (tid < 4 * kOfficialPageSize) {
+                const int store_page_slot = tid >> 6;
+                const int token = tid & 63;
+                const int64_t logical_page = first_logical_page + store_page_slot;
+                if (logical_page < MaxPages) {
+                    scores[b * max_seq_len + logical_page * kOfficialPageSize + token] = neg_inf;
+                }
+            }
+            continue;
+        }
+
+        const int64_t q_base = b * (int64_t)kOfficialHidx * kOfficialDidx;
+        const uint4* q_global_vec = reinterpret_cast<const uint4*>(q_idx + q_base);
+        for (int idx = tid; idx < kOfficialSharedVecCount; idx += blockDim.x) {
+            q_shared_vec[idx] = q_global_vec[idx];
+        }
+
+        const int64_t w_base = b * (int64_t)kOfficialHidx;
+        if (tid < kOfficialHidx) {
+            w_shared[tid] = __bfloat162float(w_idx[w_base + tid]);
+        }
+
+        if (tid < 4 * kOfficialPageSize) {
+            const int store_page_slot = tid >> 6;
+            const int token = tid & 63;
+            const int64_t logical_page = first_logical_page + store_page_slot;
+            if (logical_page < MaxPages) {
+                const int64_t store_page_start = logical_page * kOfficialPageSize;
+                if (store_page_start + token >= (int64_t)visible) {
+                    scores[b * max_seq_len + store_page_start + token] = neg_inf;
+                }
+            }
+        }
+
+        __syncthreads();
+
+        const int64_t logical_page = first_logical_page + page_slot;
+        const int64_t page_start = logical_page * kOfficialPageSize;
+        if (logical_page < MaxPages && page_start < (int64_t)visible) {
+            const int valid_count = ((int64_t)visible - page_start) < kOfficialPageSize
+                ? (int)((int64_t)visible - page_start)
+                : kOfficialPageSize;
+            const int32_t physical_page = block_table[b * MaxPages + logical_page];
+            const int64_t k_base = (int64_t)physical_page * kOfficialPageSize * kOfficialDidx;
+
+            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, __nv_bfloat16, nvcuda::wmma::row_major> a_frag;
+            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 16, 16, 16, __nv_bfloat16, nvcuda::wmma::col_major> b_frag;
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> c0_frag;
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> c1_frag;
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> c2_frag;
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 16, 16, 16, float> c3_frag;
+            nvcuda::wmma::fill_fragment(c0_frag, 0.0f);
+            nvcuda::wmma::fill_fragment(c1_frag, 0.0f);
+            nvcuda::wmma::fill_fragment(c2_frag, 0.0f);
+            nvcuda::wmma::fill_fragment(c3_frag, 0.0f);
+
+            #pragma unroll
+            for (int k_tile = 0; k_tile < 8; ++k_tile) {
+                const __nv_bfloat16* b_ptr = k_idx_cache + k_base + (n_tile * 16) * kOfficialDidx + k_tile * 16;
+                nvcuda::wmma::load_matrix_sync(b_frag, b_ptr, kOfficialDidx);
+
+                const __nv_bfloat16* a0_ptr = q_shared + k_tile * 16;
+                nvcuda::wmma::load_matrix_sync(a_frag, a0_ptr, kOfficialDidx);
+                nvcuda::wmma::mma_sync(c0_frag, a_frag, b_frag, c0_frag);
+
+                const __nv_bfloat16* a1_ptr = q_shared + 16 * kOfficialDidx + k_tile * 16;
+                nvcuda::wmma::load_matrix_sync(a_frag, a1_ptr, kOfficialDidx);
+                nvcuda::wmma::mma_sync(c1_frag, a_frag, b_frag, c1_frag);
+
+                const __nv_bfloat16* a2_ptr = q_shared + 32 * kOfficialDidx + k_tile * 16;
+                nvcuda::wmma::load_matrix_sync(a_frag, a2_ptr, kOfficialDidx);
+                nvcuda::wmma::mma_sync(c2_frag, a_frag, b_frag, c2_frag);
+
+                const __nv_bfloat16* a3_ptr = q_shared + 48 * kOfficialDidx + k_tile * 16;
+                nvcuda::wmma::load_matrix_sync(a_frag, a3_ptr, kOfficialDidx);
+                nvcuda::wmma::mma_sync(c3_frag, a_frag, b_frag, c3_frag);
+            }
+
+            const int group = lane >> 2;
+            const int quad = lane & 3;
+            float acc0 = 0.0f;
+            float acc1 = 0.0f;
+            float acc2 = 0.0f;
+            float acc3 = 0.0f;
+
+#define ACCUM_FRAGMENT(FRAG, MTILE) \
+            do { \
+                const float w0 = w_shared[(MTILE) * 16 + group]; \
+                const float w1 = w_shared[(MTILE) * 16 + group + 8]; \
+                float p0 = 0.0f; \
+                float p1 = 0.0f; \
+                float p2 = 0.0f; \
+                float p3 = 0.0f; \
+                if ((FRAG).x[0] > 0.0f) p0 = (FRAG).x[0] * w0; \
+                if ((FRAG).x[1] > 0.0f) p1 = (FRAG).x[1] * w0; \
+                if ((FRAG).x[2] > 0.0f) p0 = fmaf((FRAG).x[2], w1, p0); \
+                if ((FRAG).x[3] > 0.0f) p1 = fmaf((FRAG).x[3], w1, p1); \
+                if ((FRAG).x[4] > 0.0f) p2 = (FRAG).x[4] * w0; \
+                if ((FRAG).x[5] > 0.0f) p3 = (FRAG).x[5] * w0; \
+                if ((FRAG).x[6] > 0.0f) p2 = fmaf((FRAG).x[6], w1, p2); \
+                if ((FRAG).x[7] > 0.0f) p3 = fmaf((FRAG).x[7], w1, p3); \
+                acc0 += quad_group_reduce_sum(p0); \
+                acc1 += quad_group_reduce_sum(p1); \
+                acc2 += quad_group_reduce_sum(p2); \
+                acc3 += quad_group_reduce_sum(p3); \
+            } while (0)
+            ACCUM_FRAGMENT(c0_frag, 0);
+            ACCUM_FRAGMENT(c1_frag, 1);
+            ACCUM_FRAGMENT(c2_frag, 2);
+            ACCUM_FRAGMENT(c3_frag, 3);
+#undef ACCUM_FRAGMENT
+
+            if (group == 0) {
+                const int token0 = n_tile * 16 + quad * 2;
+                const int token1 = token0 + 1;
+                const int token2 = token0 + 8;
+                const int token3 = token0 + 9;
+                __nv_bfloat16* out_ptr = scores + b * max_seq_len + page_start;
+                if (token0 < valid_count) out_ptr[token0] = __float2bfloat16(acc0);
+                if (token1 < valid_count) out_ptr[token1] = __float2bfloat16(acc1);
+                if (token2 < valid_count) out_ptr[token2] = __float2bfloat16(acc2);
+                if (token3 < valid_count) out_ptr[token3] = __float2bfloat16(acc3);
+            }
+        }
+
+        __syncthreads();
+    }
+}
+
+
 
 }  // namespace
 
@@ -219,6 +410,24 @@ extern "C" void run_kernel(
     }
 
     if (Hidx == kOfficialHidx && Didx == kOfficialDidx && PageSize == kOfficialPageSize) {
+        if (MaxPages >= 64) {
+            int64_t group_blocks64 = B * ((MaxPages + 3) >> 2);
+            if (group_blocks64 > 65535) {
+                group_blocks64 = 65535;
+            }
+            dsa_indexer_scores_page64_group4_parallel_kernel<<<(int)group_blocks64, kPage64ThreadsPerBlock>>>(
+                q_idx,
+                k_idx_cache,
+                w_idx,
+                block_table,
+                context_lens,
+                scores,
+                B,
+                MaxPages
+            );
+            return;
+        }
+
         int64_t page_blocks64 = B * MaxPages;
         if (page_blocks64 > 65535) {
             page_blocks64 = 65535;
