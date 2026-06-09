@@ -33,6 +33,10 @@ __device__ __forceinline__ float quad_group_reduce_sum(float value) {
     return value;
 }
 
+__device__ __forceinline__ void store_bf16_pair(__nv_bfloat16* ptr, float x, float y) {
+    *reinterpret_cast<__nv_bfloat162*>(ptr) = __floats2bfloat162_rn(x, y);
+}
+
 __global__ void fill_neg_inf_kernel(
     __nv_bfloat16* __restrict__ scores,
     int64_t total
@@ -240,8 +244,6 @@ __global__ void dsa_indexer_scores_page64_group4_parallel_kernel(
     const int warp = tid >> 5;
     const int page_slot = warp >> 2;
     const int n_tile = warp & 3;
-    const int64_t groups_per_batch = (MaxPages + 3) >> 2;
-    const int64_t total_groups = B * groups_per_batch;
     const int64_t max_seq_len = MaxPages * (int64_t)kOfficialPageSize;
     const __nv_bfloat16 neg_inf = __float2bfloat16(-INFINITY);
 
@@ -249,26 +251,28 @@ __global__ void dsa_indexer_scores_page64_group4_parallel_kernel(
     __shared__ float w_shared[kOfficialHidx];
     __nv_bfloat16* q_shared = reinterpret_cast<__nv_bfloat16*>(q_shared_vec);
 
-    for (int64_t group_linear = blockIdx.x; group_linear < total_groups; group_linear += gridDim.x) {
-        const int64_t b = group_linear / groups_per_batch;
-        const int64_t group_in_batch = group_linear - b * groups_per_batch;
-        const int64_t first_logical_page = group_in_batch << 2;
-        const int32_t visible = context_lens[b];
+    if ((int64_t)blockIdx.y >= B) {
+        return;
+    }
+    const int64_t b = blockIdx.y;
+    const int64_t group_in_batch = blockIdx.x;
+    const int64_t first_logical_page = group_in_batch << 2;
+    const int32_t visible = __ldg(context_lens + b);
         const bool full_group =
             first_logical_page + 3 < MaxPages &&
             (first_logical_page + 4) * (int64_t)kOfficialPageSize <= (int64_t)visible;
 
-        if (first_logical_page * (int64_t)kOfficialPageSize >= (int64_t)visible) {
-            if (tid < 4 * kOfficialPageSize) {
-                const int store_page_slot = tid >> 6;
-                const int token = tid & 63;
-                const int64_t logical_page = first_logical_page + store_page_slot;
-                if (logical_page < MaxPages) {
-                    scores[b * max_seq_len + logical_page * kOfficialPageSize + token] = neg_inf;
-                }
+    if (first_logical_page * (int64_t)kOfficialPageSize >= (int64_t)visible) {
+        if (tid < 4 * kOfficialPageSize) {
+            const int store_page_slot = tid >> 6;
+            const int token = tid & 63;
+            const int64_t logical_page = first_logical_page + store_page_slot;
+            if (logical_page < MaxPages) {
+                scores[b * max_seq_len + logical_page * kOfficialPageSize + token] = neg_inf;
             }
-            continue;
         }
+        return;
+    }
 
         const int64_t q_base = b * (int64_t)kOfficialHidx * kOfficialDidx;
         const uint4* q_global_vec = reinterpret_cast<const uint4*>(q_idx + q_base);
@@ -303,7 +307,7 @@ __global__ void dsa_indexer_scores_page64_group4_parallel_kernel(
                 : (((int64_t)visible - page_start) < kOfficialPageSize
                     ? (int)((int64_t)visible - page_start)
                     : kOfficialPageSize);
-            const int32_t physical_page = block_table[b * MaxPages + logical_page];
+            const int32_t physical_page = __ldg(block_table + b * MaxPages + logical_page);
             const int64_t k_base = (int64_t)physical_page * kOfficialPageSize * kOfficialDidx;
 
             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, __nv_bfloat16, nvcuda::wmma::row_major> a_frag;
@@ -380,21 +384,24 @@ __global__ void dsa_indexer_scores_page64_group4_parallel_kernel(
                 const int token3 = token0 + 9;
                 __nv_bfloat16* out_ptr = scores + b * max_seq_len + page_start;
                 if (full_group) {
-                    out_ptr[token0] = __float2bfloat16(acc0);
-                    out_ptr[token1] = __float2bfloat16(acc1);
-                    out_ptr[token2] = __float2bfloat16(acc2);
-                    out_ptr[token3] = __float2bfloat16(acc3);
+                    store_bf16_pair(out_ptr + token0, acc0, acc1);
+                    store_bf16_pair(out_ptr + token2, acc2, acc3);
                 } else {
-                    if (token0 < valid_count) out_ptr[token0] = __float2bfloat16(acc0);
-                    if (token1 < valid_count) out_ptr[token1] = __float2bfloat16(acc1);
-                    if (token2 < valid_count) out_ptr[token2] = __float2bfloat16(acc2);
-                    if (token3 < valid_count) out_ptr[token3] = __float2bfloat16(acc3);
+                    if (token1 < valid_count) {
+                        store_bf16_pair(out_ptr + token0, acc0, acc1);
+                    } else if (token0 < valid_count) {
+                        out_ptr[token0] = __float2bfloat16(acc0);
+                    }
+                    if (token3 < valid_count) {
+                        store_bf16_pair(out_ptr + token2, acc2, acc3);
+                    } else if (token2 < valid_count) {
+                        out_ptr[token2] = __float2bfloat16(acc2);
+                    }
                 }
             }
         }
 
-        __syncthreads();
-    }
+    __syncthreads();
 }
 
 __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
@@ -412,8 +419,6 @@ __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
     const int warp = tid >> 5;
     const int pair_slot = warp >> 2;
     const int n_tile = warp & 3;
-    const int64_t groups_per_batch = (MaxPages + 7) >> 3;
-    const int64_t total_groups = B * groups_per_batch;
     const int64_t max_seq_len = MaxPages * (int64_t)kOfficialPageSize;
     const __nv_bfloat16 neg_inf = __float2bfloat16(-INFINITY);
 
@@ -421,24 +426,26 @@ __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
     __shared__ float w_shared[kOfficialHidx];
     __nv_bfloat16* q_shared = reinterpret_cast<__nv_bfloat16*>(q_shared_vec);
 
-    for (int64_t group_linear = blockIdx.x; group_linear < total_groups; group_linear += gridDim.x) {
-        const int64_t b = group_linear / groups_per_batch;
-        const int64_t group_in_batch = group_linear - b * groups_per_batch;
-        const int64_t first_logical_page = group_in_batch << 3;
-        const int32_t visible = context_lens[b];
+    if ((int64_t)blockIdx.y >= B) {
+        return;
+    }
+    const int64_t b = blockIdx.y;
+    const int64_t group_in_batch = blockIdx.x;
+    const int64_t first_logical_page = group_in_batch << 3;
+    const int32_t visible = __ldg(context_lens + b);
         const bool full_group =
             first_logical_page + 7 < MaxPages &&
             (first_logical_page + 8) * (int64_t)kOfficialPageSize <= (int64_t)visible;
 
-        if (first_logical_page * (int64_t)kOfficialPageSize >= (int64_t)visible) {
-            for (int idx = tid; idx < 8 * kOfficialPageSize; idx += blockDim.x) {
-                const int64_t logical_page = first_logical_page + (idx >> 6);
-                if (logical_page < MaxPages) {
-                    scores[b * max_seq_len + logical_page * kOfficialPageSize + (idx & 63)] = neg_inf;
-                }
+    if (first_logical_page * (int64_t)kOfficialPageSize >= (int64_t)visible) {
+        for (int idx = tid; idx < 8 * kOfficialPageSize; idx += blockDim.x) {
+            const int64_t logical_page = first_logical_page + (idx >> 6);
+            if (logical_page < MaxPages) {
+                scores[b * max_seq_len + logical_page * kOfficialPageSize + (idx & 63)] = neg_inf;
             }
-            continue;
         }
+        return;
+    }
 
         const int64_t q_base = b * (int64_t)kOfficialHidx * kOfficialDidx;
         const uint4* q_global_vec = reinterpret_cast<const uint4*>(q_idx + q_base);
@@ -479,8 +486,8 @@ __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
             const int valid_count1 = full_group ? kOfficialPageSize :
                 (((int64_t)visible - page_start1) < kOfficialPageSize ?
                     (int)((int64_t)visible - page_start1) : kOfficialPageSize);
-            const int32_t physical_page0 = page0_valid ? block_table[b * MaxPages + logical_page0] : 0;
-            const int32_t physical_page1 = page1_valid ? block_table[b * MaxPages + logical_page1] : 0;
+            const int32_t physical_page0 = page0_valid ? __ldg(block_table + b * MaxPages + logical_page0) : 0;
+            const int32_t physical_page1 = page1_valid ? __ldg(block_table + b * MaxPages + logical_page1) : 0;
             const int64_t k_base0 = (int64_t)physical_page0 * kOfficialPageSize * kOfficialDidx;
             const int64_t k_base1 = (int64_t)physical_page1 * kOfficialPageSize * kOfficialDidx;
 
@@ -570,15 +577,19 @@ __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
                     const int token3 = token0 + 9;
                     __nv_bfloat16* out_ptr = scores + b * max_seq_len + page_start0;
                     if (full_group) {
-                        out_ptr[token0] = __float2bfloat16(acc00);
-                        out_ptr[token1] = __float2bfloat16(acc01);
-                        out_ptr[token2] = __float2bfloat16(acc02);
-                        out_ptr[token3] = __float2bfloat16(acc03);
+                        store_bf16_pair(out_ptr + token0, acc00, acc01);
+                        store_bf16_pair(out_ptr + token2, acc02, acc03);
                     } else {
-                        if (token0 < valid_count0) out_ptr[token0] = __float2bfloat16(acc00);
-                        if (token1 < valid_count0) out_ptr[token1] = __float2bfloat16(acc01);
-                        if (token2 < valid_count0) out_ptr[token2] = __float2bfloat16(acc02);
-                        if (token3 < valid_count0) out_ptr[token3] = __float2bfloat16(acc03);
+                        if (token1 < valid_count0) {
+                            store_bf16_pair(out_ptr + token0, acc00, acc01);
+                        } else if (token0 < valid_count0) {
+                            out_ptr[token0] = __float2bfloat16(acc00);
+                        }
+                        if (token3 < valid_count0) {
+                            store_bf16_pair(out_ptr + token2, acc02, acc03);
+                        } else if (token2 < valid_count0) {
+                            out_ptr[token2] = __float2bfloat16(acc02);
+                        }
                     }
                 }
             }
@@ -599,23 +610,26 @@ __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
                     const int token3 = token0 + 9;
                     __nv_bfloat16* out_ptr = scores + b * max_seq_len + page_start1;
                     if (full_group) {
-                        out_ptr[token0] = __float2bfloat16(acc10);
-                        out_ptr[token1] = __float2bfloat16(acc11);
-                        out_ptr[token2] = __float2bfloat16(acc12);
-                        out_ptr[token3] = __float2bfloat16(acc13);
+                        store_bf16_pair(out_ptr + token0, acc10, acc11);
+                        store_bf16_pair(out_ptr + token2, acc12, acc13);
                     } else {
-                        if (token0 < valid_count1) out_ptr[token0] = __float2bfloat16(acc10);
-                        if (token1 < valid_count1) out_ptr[token1] = __float2bfloat16(acc11);
-                        if (token2 < valid_count1) out_ptr[token2] = __float2bfloat16(acc12);
-                        if (token3 < valid_count1) out_ptr[token3] = __float2bfloat16(acc13);
+                        if (token1 < valid_count1) {
+                            store_bf16_pair(out_ptr + token0, acc10, acc11);
+                        } else if (token0 < valid_count1) {
+                            out_ptr[token0] = __float2bfloat16(acc10);
+                        }
+                        if (token3 < valid_count1) {
+                            store_bf16_pair(out_ptr + token2, acc12, acc13);
+                        } else if (token2 < valid_count1) {
+                            out_ptr[token2] = __float2bfloat16(acc12);
+                        }
                     }
                 }
             }
 #undef ACCUM_FRAGMENT_PAIR
         }
 
-        __syncthreads();
-    }
+    __syncthreads();
 }
 
 }  // namespace
@@ -640,12 +654,9 @@ extern "C" void run_kernel(
     }
 
     if (Hidx == kOfficialHidx && Didx == kOfficialDidx && PageSize == kOfficialPageSize) {
-        if (MaxPages >= 256) {
-            int64_t group_blocks64 = B * ((MaxPages + 7) >> 3);
-            if (group_blocks64 > 65535) {
-                group_blocks64 = 65535;
-            }
-            dsa_indexer_scores_page64_group8_pair_kernel<<<(int)group_blocks64, kPage64ThreadsPerBlock>>>(
+        if (MaxPages >= 128) {
+            dim3 group_grid((unsigned)((MaxPages + 7) >> 3), (unsigned)B);
+            dsa_indexer_scores_page64_group8_pair_kernel<<<group_grid, kPage64ThreadsPerBlock>>>(
                 q_idx,
                 k_idx_cache,
                 w_idx,
@@ -659,11 +670,8 @@ extern "C" void run_kernel(
         }
 
         if (MaxPages >= 64) {
-            int64_t group_blocks64 = B * ((MaxPages + 3) >> 2);
-            if (group_blocks64 > 65535) {
-                group_blocks64 = 65535;
-            }
-            dsa_indexer_scores_page64_group4_parallel_kernel<<<(int)group_blocks64, kPage64ThreadsPerBlock>>>(
+            dim3 group_grid((unsigned)((MaxPages + 3) >> 2), (unsigned)B);
+            dsa_indexer_scores_page64_group4_parallel_kernel<<<group_grid, kPage64ThreadsPerBlock>>>(
                 q_idx,
                 k_idx_cache,
                 w_idx,
