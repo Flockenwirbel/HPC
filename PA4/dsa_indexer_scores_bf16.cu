@@ -14,6 +14,7 @@ constexpr int kThreadsPerBlock = 256;
 constexpr int kPage64ThreadsPerBlock = 512;
 constexpr int kBf16PerUint4 = 8;
 constexpr int kOfficialSharedVecCount = kOfficialHidx * kOfficialDidx / kBf16PerUint4;
+constexpr int kPage64PartialStride = kOfficialPageSize + 1;
 
 __device__ __forceinline__ float warp_reduce_sum(float value) {
     unsigned mask = 0xffffffffu;
@@ -35,18 +36,6 @@ __device__ __forceinline__ float quad_group_reduce_sum(float value) {
 
 __device__ __forceinline__ void store_bf16_pair(__nv_bfloat16* ptr, float x, float y) {
     *reinterpret_cast<__nv_bfloat162*>(ptr) = __floats2bfloat162_rn(x, y);
-}
-
-__global__ void fill_neg_inf_kernel(
-    __nv_bfloat16* __restrict__ scores,
-    int64_t total
-) {
-    const __nv_bfloat16 neg_inf = __float2bfloat16(-INFINITY);
-    for (int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-         idx < total;
-         idx += (int64_t)blockDim.x * gridDim.x) {
-        scores[idx] = neg_inf;
-    }
 }
 
 __global__ void dsa_indexer_scores_page_fallback_kernel(
@@ -75,12 +64,19 @@ __global__ void dsa_indexer_scores_page_fallback_kernel(
         const int64_t page_start = logical_page * PageSize;
         const int32_t visible = context_lens[b];
 
+        const __nv_bfloat16 neg_inf = __float2bfloat16(-INFINITY);
         if (page_start >= (int64_t)visible) {
+            for (int64_t token = tid; token < PageSize; token += blockDim.x) {
+                scores[b * max_seq_len + page_start + token] = neg_inf;
+            }
             continue;
         }
 
         const int64_t remaining = (int64_t)visible - page_start;
         const int64_t valid_count = remaining < PageSize ? remaining : PageSize;
+        for (int64_t token = valid_count + tid; token < PageSize; token += blockDim.x) {
+            scores[b * max_seq_len + page_start + token] = neg_inf;
+        }
         const int32_t physical_page = block_table[b * MaxPages + logical_page];
         const int64_t q_batch_base = b * Hidx * Didx;
         const int64_t w_batch_base = b * Hidx;
@@ -128,7 +124,7 @@ __global__ void dsa_indexer_scores_page64_kernel(
     const int64_t max_seq_len = MaxPages * (int64_t)kOfficialPageSize;
 
     __shared__ uint4 k_shared_vec[kOfficialSharedVecCount];
-    __shared__ float partial_shared[4 * kOfficialPageSize];
+    __shared__ float partial_shared[4 * kPage64PartialStride];
     __shared__ float w_shared[kOfficialHidx];
     __nv_bfloat16* k_shared = reinterpret_cast<__nv_bfloat16*>(k_shared_vec);
 
@@ -189,24 +185,24 @@ __global__ void dsa_indexer_scores_page64_kernel(
                 float p1 = 0.0f;
                 float p2 = 0.0f;
                 float p3 = 0.0f;
-                if (c_frag.x[0] > 0.0f) p0 = c_frag.x[0] * w0;
-                if (c_frag.x[1] > 0.0f) p1 = c_frag.x[1] * w0;
-                if (c_frag.x[2] > 0.0f) p0 = fmaf(c_frag.x[2], w1, p0);
-                if (c_frag.x[3] > 0.0f) p1 = fmaf(c_frag.x[3], w1, p1);
-                if (c_frag.x[4] > 0.0f) p2 = c_frag.x[4] * w0;
-                if (c_frag.x[5] > 0.0f) p3 = c_frag.x[5] * w0;
-                if (c_frag.x[6] > 0.0f) p2 = fmaf(c_frag.x[6], w1, p2);
-                if (c_frag.x[7] > 0.0f) p3 = fmaf(c_frag.x[7], w1, p3);
+                p0 = fmaxf(c_frag.x[0], 0.0f) * w0;
+                p1 = fmaxf(c_frag.x[1], 0.0f) * w0;
+                p0 = fmaf(fmaxf(c_frag.x[2], 0.0f), w1, p0);
+                p1 = fmaf(fmaxf(c_frag.x[3], 0.0f), w1, p1);
+                p2 = fmaxf(c_frag.x[4], 0.0f) * w0;
+                p3 = fmaxf(c_frag.x[5], 0.0f) * w0;
+                p2 = fmaf(fmaxf(c_frag.x[6], 0.0f), w1, p2);
+                p3 = fmaf(fmaxf(c_frag.x[7], 0.0f), w1, p3);
 
                 p0 = quad_group_reduce_sum(p0);
                 p1 = quad_group_reduce_sum(p1);
                 p2 = quad_group_reduce_sum(p2);
                 p3 = quad_group_reduce_sum(p3);
                 if (group == 0) {
-                    partial_shared[m_tile * kOfficialPageSize + n_tile * 16 + quad * 2] = p0;
-                    partial_shared[m_tile * kOfficialPageSize + n_tile * 16 + quad * 2 + 1] = p1;
-                    partial_shared[m_tile * kOfficialPageSize + n_tile * 16 + quad * 2 + 8] = p2;
-                    partial_shared[m_tile * kOfficialPageSize + n_tile * 16 + quad * 2 + 9] = p3;
+                    partial_shared[m_tile * kPage64PartialStride + n_tile * 16 + quad * 2] = p0;
+                    partial_shared[m_tile * kPage64PartialStride + n_tile * 16 + quad * 2 + 1] = p1;
+                    partial_shared[m_tile * kPage64PartialStride + n_tile * 16 + quad * 2 + 8] = p2;
+                    partial_shared[m_tile * kPage64PartialStride + n_tile * 16 + quad * 2 + 9] = p3;
                 }
             }
 
@@ -215,9 +211,9 @@ __global__ void dsa_indexer_scores_page64_kernel(
             if (tid < kOfficialPageSize) {
                 if (tid < valid_count) {
                     float acc = partial_shared[tid];
-                    acc += partial_shared[kOfficialPageSize + tid];
-                    acc += partial_shared[2 * kOfficialPageSize + tid];
-                    acc += partial_shared[3 * kOfficialPageSize + tid];
+                    acc += partial_shared[kPage64PartialStride + tid];
+                    acc += partial_shared[2 * kPage64PartialStride + tid];
+                    acc += partial_shared[3 * kPage64PartialStride + tid];
                     scores[b * max_seq_len + page_start + tid] = __float2bfloat16(acc);
                 } else {
                     scores[b * max_seq_len + page_start + tid] = neg_inf;
@@ -358,14 +354,14 @@ __global__ void dsa_indexer_scores_page64_group4_parallel_kernel(
                 float p1 = 0.0f; \
                 float p2 = 0.0f; \
                 float p3 = 0.0f; \
-                if ((FRAG).x[0] > 0.0f) p0 = (FRAG).x[0] * w0; \
-                if ((FRAG).x[1] > 0.0f) p1 = (FRAG).x[1] * w0; \
-                if ((FRAG).x[2] > 0.0f) p0 = fmaf((FRAG).x[2], w1, p0); \
-                if ((FRAG).x[3] > 0.0f) p1 = fmaf((FRAG).x[3], w1, p1); \
-                if ((FRAG).x[4] > 0.0f) p2 = (FRAG).x[4] * w0; \
-                if ((FRAG).x[5] > 0.0f) p3 = (FRAG).x[5] * w0; \
-                if ((FRAG).x[6] > 0.0f) p2 = fmaf((FRAG).x[6], w1, p2); \
-                if ((FRAG).x[7] > 0.0f) p3 = fmaf((FRAG).x[7], w1, p3); \
+                p0 = fmaxf((FRAG).x[0], 0.0f) * w0; \
+                p1 = fmaxf((FRAG).x[1], 0.0f) * w0; \
+                p0 = fmaf(fmaxf((FRAG).x[2], 0.0f), w1, p0); \
+                p1 = fmaf(fmaxf((FRAG).x[3], 0.0f), w1, p1); \
+                p2 = fmaxf((FRAG).x[4], 0.0f) * w0; \
+                p3 = fmaxf((FRAG).x[5], 0.0f) * w0; \
+                p2 = fmaf(fmaxf((FRAG).x[6], 0.0f), w1, p2); \
+                p3 = fmaf(fmaxf((FRAG).x[7], 0.0f), w1, p3); \
                 acc0 += quad_group_reduce_sum(p0); \
                 acc1 += quad_group_reduce_sum(p1); \
                 acc2 += quad_group_reduce_sum(p2); \
@@ -400,8 +396,6 @@ __global__ void dsa_indexer_scores_page64_group4_parallel_kernel(
                 }
             }
         }
-
-    __syncthreads();
 }
 
 __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
@@ -547,14 +541,14 @@ __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
                 float p1 = 0.0f; \
                 float p2 = 0.0f; \
                 float p3 = 0.0f; \
-                if ((FRAG).x[0] > 0.0f) p0 = (FRAG).x[0] * w0; \
-                if ((FRAG).x[1] > 0.0f) p1 = (FRAG).x[1] * w0; \
-                if ((FRAG).x[2] > 0.0f) p0 = fmaf((FRAG).x[2], w1, p0); \
-                if ((FRAG).x[3] > 0.0f) p1 = fmaf((FRAG).x[3], w1, p1); \
-                if ((FRAG).x[4] > 0.0f) p2 = (FRAG).x[4] * w0; \
-                if ((FRAG).x[5] > 0.0f) p3 = (FRAG).x[5] * w0; \
-                if ((FRAG).x[6] > 0.0f) p2 = fmaf((FRAG).x[6], w1, p2); \
-                if ((FRAG).x[7] > 0.0f) p3 = fmaf((FRAG).x[7], w1, p3); \
+                p0 = fmaxf((FRAG).x[0], 0.0f) * w0; \
+                p1 = fmaxf((FRAG).x[1], 0.0f) * w0; \
+                p0 = fmaf(fmaxf((FRAG).x[2], 0.0f), w1, p0); \
+                p1 = fmaf(fmaxf((FRAG).x[3], 0.0f), w1, p1); \
+                p2 = fmaxf((FRAG).x[4], 0.0f) * w0; \
+                p3 = fmaxf((FRAG).x[5], 0.0f) * w0; \
+                p2 = fmaf(fmaxf((FRAG).x[6], 0.0f), w1, p2); \
+                p3 = fmaf(fmaxf((FRAG).x[7], 0.0f), w1, p3); \
                 (A0) += quad_group_reduce_sum(p0); \
                 (A1) += quad_group_reduce_sum(p1); \
                 (A2) += quad_group_reduce_sum(p2); \
@@ -628,8 +622,6 @@ __global__ void dsa_indexer_scores_page64_group8_pair_kernel(
             }
 #undef ACCUM_FRAGMENT_PAIR
         }
-
-    __syncthreads();
 }
 
 }  // namespace
@@ -700,12 +692,6 @@ extern "C" void run_kernel(
         );
         return;
     }
-
-    int64_t fill_blocks64 = (total_scores + kThreadsPerBlock - 1) / kThreadsPerBlock;
-    if (fill_blocks64 > 65535) {
-        fill_blocks64 = 65535;
-    }
-    fill_neg_inf_kernel<<<(int)fill_blocks64, kThreadsPerBlock>>>(scores, total_scores);
 
     int64_t page_blocks64 = B * MaxPages;
     if (page_blocks64 > 65535) {
