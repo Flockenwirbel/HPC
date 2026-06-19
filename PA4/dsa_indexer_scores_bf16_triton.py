@@ -9,6 +9,83 @@ SMALL_TOTAL_PAGES_THRESHOLD = 2048
 
 
 @triton.jit
+def _dsa_indexer_scores_empty_feature_kernel(
+    context_lens_ptr,
+    scores_ptr,
+    max_seq_len,
+):
+    pid = tl.program_id(axis=0)
+    b = pid // max_seq_len
+    s = pid - b * max_seq_len
+
+    visible = tl.load(context_lens_ptr + b)
+    out = tl.where(s < visible, 0.0, float("-inf"))
+    tl.store(scores_ptr + b * max_seq_len + s, out.to(tl.bfloat16))
+
+
+@triton.jit
+def _dsa_indexer_scores_generic_kernel(
+    q_idx_ptr,
+    k_idx_cache_ptr,
+    w_idx_ptr,
+    block_table_ptr,
+    context_lens_ptr,
+    scores_ptr,
+    max_pages,
+    max_seq_len,
+    HIDX: tl.constexpr,
+    DIDX: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    b = pid // max_seq_len
+    s = pid - b * max_seq_len
+
+    visible = tl.load(context_lens_ptr + b)
+    out_ptr = scores_ptr + b * max_seq_len + s
+
+    if s < visible:
+        logical_page = s // PAGE_SIZE
+        page_offset = s - logical_page * PAGE_SIZE
+        physical_page = tl.load(block_table_ptr + b * max_pages + logical_page)
+
+        offs_h = tl.arange(0, BLOCK_H)
+        offs_d = tl.arange(0, BLOCK_D)
+        token_k_base = (physical_page * PAGE_SIZE + page_offset) * DIDX
+        acc = tl.full((), 0.0, tl.float32)
+
+        for h_base in tl.range(0, HIDX, BLOCK_H, loop_unroll_factor=1):
+            h = h_base + offs_h
+            h_mask = h < HIDX
+            dots = tl.full((BLOCK_H,), 0.0, tl.float32)
+
+            for d_base in tl.range(0, DIDX, BLOCK_D, loop_unroll_factor=1):
+                d = d_base + offs_d
+                d_mask = d < DIDX
+                q = tl.load(
+                    q_idx_ptr + ((b * HIDX + h[:, None]) * DIDX + d[None, :]),
+                    mask=h_mask[:, None] & d_mask[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                k = tl.load(
+                    k_idx_cache_ptr + token_k_base + d,
+                    mask=d_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                dots += tl.sum(q * k[None, :], axis=1)
+
+            w = tl.load(w_idx_ptr + b * HIDX + h, mask=h_mask, other=0.0).to(tl.float32)
+            acc += tl.sum(tl.maximum(dots, 0.0) * w, axis=0)
+
+        tl.store(out_ptr, acc.to(tl.bfloat16))
+    else:
+        out = tl.full((), float("-inf"), tl.float32)
+        tl.store(out_ptr, out.to(tl.bfloat16))
+
+
+@triton.jit
 def _dsa_indexer_scores_small_full_kernel(
     q_idx_ptr,
     k_idx_cache_ptr,
@@ -151,16 +228,43 @@ def run_kernel(
     MaxPages,
     PageSize,
 ):
-    if Hidx != OFFICIAL_HIDX or Didx != OFFICIAL_DIDX or PageSize != OFFICIAL_PAGE_SIZE:
-        raise NotImplementedError(
-            "Experimental Triton version only supports Hidx=64, Didx=128, PageSize=64"
-        )
-
     max_seq_len = MaxPages * PageSize
-    if B <= 0 or MaxPages <= 0 or max_seq_len <= 0:
+    if B <= 0 or MaxPages <= 0 or PageSize <= 0 or max_seq_len <= 0:
         return
 
     total_pages = B * MaxPages
+
+    if Hidx <= 0 or Didx <= 0:
+        _dsa_indexer_scores_empty_feature_kernel[(B * max_seq_len,)](
+            context_lens,
+            scores,
+            max_seq_len,
+            num_warps=4,
+        )
+        return
+
+    if Hidx != OFFICIAL_HIDX or Didx != OFFICIAL_DIDX or PageSize != OFFICIAL_PAGE_SIZE:
+        block_h = min(32, triton.next_power_of_2(Hidx))
+        block_d = min(64, triton.next_power_of_2(Didx))
+        _dsa_indexer_scores_generic_kernel[(B * max_seq_len,)](
+            q_idx,
+            k_idx_cache,
+            w_idx,
+            block_table,
+            context_lens,
+            scores,
+            MaxPages,
+            max_seq_len,
+            HIDX=Hidx,
+            DIDX=Didx,
+            PAGE_SIZE=PageSize,
+            BLOCK_H=block_h,
+            BLOCK_D=block_d,
+            num_warps=4,
+            num_stages=3,
+        )
+        return
+
     grid = (total_pages,)
 
     if total_pages <= SMALL_TOTAL_PAGES_THRESHOLD:
