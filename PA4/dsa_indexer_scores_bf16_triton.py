@@ -37,7 +37,6 @@ def _dsa_indexer_scores_official_2page_kernel(
     offs_n = tl.arange(0, 128)
     offs_h = tl.arange(0, 64)
     offs_d = tl.arange(0, 128)
-    offs_page = tl.arange(0, 64)
     tokens = tile_start + offs_n
     neg_inf = tl.full((128,), -float("inf"), tl.float32)
 
@@ -109,6 +108,93 @@ def _dsa_indexer_scores_official_2page_kernel(
     else:
         in_seq = tokens < max_seq_len
         tl.store(scores + b * max_seq_len + tokens, neg_inf, mask=in_seq)
+
+
+@triton.jit
+def _dsa_indexer_scores_official_group4_page_kernel(
+    q_idx,
+    k_idx_cache,
+    w_idx,
+    block_table,
+    context_lens,
+    scores,
+    MAX_PAGES: tl.constexpr,
+):
+    group_id = tl.program_id(0)
+    b = tl.program_id(1)
+
+    max_seq_len = MAX_PAGES * 64
+    first_page = group_id * 4
+    first_start = first_page * 64
+    visible = tl.load(context_lens + b, eviction_policy="evict_last")
+
+    offs_n = tl.arange(0, 64)
+    offs_h = tl.arange(0, 64)
+    offs_d = tl.arange(0, 128)
+    neg_inf = tl.full((64,), -float("inf"), tl.float32)
+
+    if first_start < visible:
+        q = tl.load(
+            q_idx + ((b * 64 + offs_h[:, None]) * 128 + offs_d[None, :]),
+            eviction_policy="evict_last",
+        )
+        weights = tl.load(
+            w_idx + b * 64 + offs_h,
+            eviction_policy="evict_last",
+        ).to(tl.float32)
+
+        full_group = (first_page + 3 < MAX_PAGES) & (first_start + 256 <= visible)
+        if full_group:
+            for page_i in tl.static_range(0, 4):
+                logical_page = first_page + page_i
+                page_start = first_start + page_i * 64
+                physical_page = tl.load(
+                    block_table + b * MAX_PAGES + logical_page,
+                    eviction_policy="evict_first",
+                )
+                k = tl.load(
+                    k_idx_cache + ((physical_page * 64 + offs_n[:, None]) * 128 + offs_d[None, :]),
+                    eviction_policy="evict_first",
+                )
+                dots = tl.dot(k, tl.trans(q), out_dtype=tl.float32)
+                score = tl.sum(tl.maximum(dots, 0.0) * weights[None, :], axis=1)
+                tl.store(scores + b * max_seq_len + page_start + offs_n, score)
+        else:
+            for page_i in tl.static_range(0, 4):
+                logical_page = first_page + page_i
+                page_start = first_start + page_i * 64
+                page_in_range = logical_page < MAX_PAGES
+                page_has_visible = page_in_range & (page_start < visible)
+                out_ptrs = scores + b * max_seq_len + page_start + offs_n
+
+                if page_has_visible:
+                    physical_page = tl.load(
+                        block_table + b * MAX_PAGES + logical_page,
+                        eviction_policy="evict_first",
+                    )
+                    k = tl.load(
+                        k_idx_cache + ((physical_page * 64 + offs_n[:, None]) * 128 + offs_d[None, :]),
+                        eviction_policy="evict_first",
+                    )
+                    dots = tl.dot(k, tl.trans(q), out_dtype=tl.float32)
+                    score = tl.sum(tl.maximum(dots, 0.0) * weights[None, :], axis=1)
+                    if page_start + 64 <= visible:
+                        tl.store(out_ptrs, score)
+                    else:
+                        token_valid = page_start + offs_n < visible
+                        tl.store(out_ptrs, tl.where(token_valid, score, neg_inf))
+                else:
+                    tl.store(out_ptrs, neg_inf, mask=page_in_range)
+    else:
+        for page_i in tl.static_range(0, 4):
+            logical_page = first_page + page_i
+            page_start = first_start + page_i * 64
+            page_in_range = logical_page < MAX_PAGES
+            tl.store(
+                scores + b * max_seq_len + page_start + offs_n,
+                neg_inf,
+                mask=page_in_range,
+            )
 
 
 @triton.jit
@@ -234,6 +320,21 @@ def run_kernel(
         return
 
     total_pages = B * MaxPages
+    if Hidx == 64 and Didx == 128 and PageSize == 64 and total_pages >= 4096:
+        grid = (triton.cdiv(MaxPages, 4), B)
+        _dsa_indexer_scores_official_group4_page_kernel[grid](
+            q_idx,
+            k_idx_cache,
+            w_idx,
+            block_table,
+            context_lens,
+            scores,
+            MAX_PAGES=MaxPages,
+            num_warps=8,
+            num_stages=3,
+        )
+        return
+
     if Hidx == 64 and Didx == 128 and PageSize == 64 and total_pages >= 512:
         grid = (triton.cdiv(max_seq_len, 128), B)
         _dsa_indexer_scores_official_2page_kernel[grid](
