@@ -301,34 +301,36 @@ def _dsa_indexer_scores_wide_token_kernel(
     token_global = tile_start + offs_n
     score_ptrs = scores_ptr + b * MAX_SEQ_LEN + token_global
 
-    visible = tl.load(context_lens_ptr + b, eviction_policy="evict_last")
+    visible = tl.load(context_lens_ptr + b)
     in_bounds = token_global < MAX_SEQ_LEN
     neg_inf = tl.full((BLOCK_N,), float("-inf"), tl.float32)
 
     if tile_start >= visible:
         tl.store(score_ptrs, neg_inf.to(tl.bfloat16), mask=in_bounds)
     else:
-        page_base = tile_start // PAGE_SIZE
-        page_in_tile = offs_n // PAGE_SIZE
-        page_offsets = offs_n - page_in_tile * PAGE_SIZE
-        p0 = tl.load(block_table_ptr + b * MAX_PAGES + page_base, eviction_policy="evict_first")
-        p1 = tl.load(block_table_ptr + b * MAX_PAGES + page_base + 1, mask=page_base + 1 < MAX_PAGES, other=0, eviction_policy="evict_first")
-        physical_pages = tl.where(page_in_tile == 0, p0, p1)
-
+        logical_pages = token_global // PAGE_SIZE
+        page_offsets = token_global - logical_pages * PAGE_SIZE
         q_ptrs = q_idx_ptr + ((b * HIDX + offs_h[:, None]) * DIDX + offs_d[None, :])
-        q = tl.load(q_ptrs, eviction_policy="evict_last")
-        w = tl.load(w_idx_ptr + b * HIDX + offs_h, eviction_policy="evict_last").to(tl.float32)
-        k_ptrs = k_idx_cache_ptr + ((physical_pages[:, None] * PAGE_SIZE + page_offsets[:, None]) * DIDX + offs_d[None, :])
+        q = tl.load(q_ptrs)
+        w = tl.load(w_idx_ptr + b * HIDX + offs_h).to(tl.float32)
 
         if tile_start + BLOCK_N <= visible:
-            k = tl.load(k_ptrs, eviction_policy="evict_first")
+            physical_pages = tl.load(block_table_ptr + b * MAX_PAGES + logical_pages)
+            k_ptrs = k_idx_cache_ptr + ((physical_pages[:, None] * PAGE_SIZE + page_offsets[:, None]) * DIDX + offs_d[None, :])
+            k = tl.load(k_ptrs)
             dots = tl.dot(q, tl.trans(k), out_dtype=tl.float32)
             dots = tl.maximum(dots, 0.0)
             scores_block = tl.sum(dots * w[:, None], axis=0)
-            tl.store(score_ptrs, scores_block.to(tl.bfloat16), mask=in_bounds)
+            tl.store(score_ptrs, scores_block.to(tl.bfloat16))
         else:
             token_valid = (token_global < visible) & in_bounds
-            k = tl.load(k_ptrs, mask=token_valid[:, None], other=0.0, eviction_policy="evict_first")
+            physical_pages = tl.load(
+                block_table_ptr + b * MAX_PAGES + logical_pages,
+                mask=token_valid,
+                other=0,
+            )
+            k_ptrs = k_idx_cache_ptr + ((physical_pages[:, None] * PAGE_SIZE + page_offsets[:, None]) * DIDX + offs_d[None, :])
+            k = tl.load(k_ptrs, mask=token_valid[:, None], other=0.0)
             dots = tl.dot(q, tl.trans(k), out_dtype=tl.float32)
             dots = tl.maximum(dots, 0.0)
             scores_block = tl.sum(dots * w[:, None], axis=0)
@@ -361,47 +363,50 @@ def _dsa_indexer_scores_head_blocked_kernel(
     token_global = tile_start + offs_n
     score_ptrs = scores_ptr + b * MAX_SEQ_LEN + token_global
 
-    visible = tl.load(context_lens_ptr + b, eviction_policy="evict_last")
+    visible = tl.load(context_lens_ptr + b)
     in_bounds = token_global < MAX_SEQ_LEN
     neg_inf = tl.full((BLOCK_N,), float("-inf"), tl.float32)
 
     if tile_start >= visible:
         tl.store(score_ptrs, neg_inf.to(tl.bfloat16), mask=in_bounds)
     else:
-        page_base = tile_start // PAGE_SIZE
-        page_in_tile = offs_n // PAGE_SIZE
-        page_offsets = offs_n - page_in_tile * PAGE_SIZE
-        p0 = tl.load(block_table_ptr + b * MAX_PAGES + page_base, eviction_policy="evict_first")
-        p1 = tl.load(block_table_ptr + b * MAX_PAGES + page_base + 1, mask=page_base + 1 < MAX_PAGES, other=0, eviction_policy="evict_first")
-        physical_pages = tl.where(page_in_tile == 0, p0, p1)
-        k_ptrs = k_idx_cache_ptr + ((physical_pages[:, None] * PAGE_SIZE + page_offsets[:, None]) * DIDX + offs_d[None, :])
+        logical_pages = token_global // PAGE_SIZE
+        page_offsets = token_global - logical_pages * PAGE_SIZE
 
         if tile_start + BLOCK_N <= visible:
-            k = tl.load(k_ptrs, eviction_policy="evict_first")
+            physical_pages = tl.load(block_table_ptr + b * MAX_PAGES + logical_pages)
+            k_ptrs = k_idx_cache_ptr + ((physical_pages[:, None] * PAGE_SIZE + page_offsets[:, None]) * DIDX + offs_d[None, :])
+            k = tl.load(k_ptrs)
 
             scores_block = tl.full((BLOCK_N,), 0.0, tl.float32)
             offs_h = tl.arange(0, BLOCK_H)
             for h_base in tl.static_range(0, HIDX, BLOCK_H):
                 h = h_base + offs_h
                 q_ptrs = q_idx_ptr + ((b * HIDX + h[:, None]) * DIDX + offs_d[None, :])
-                q = tl.load(q_ptrs, eviction_policy="evict_last")
-                w = tl.load(w_idx_ptr + b * HIDX + h, eviction_policy="evict_last").to(tl.float32)
+                q = tl.load(q_ptrs)
+                w = tl.load(w_idx_ptr + b * HIDX + h).to(tl.float32)
                 dots = tl.dot(q, tl.trans(k), out_dtype=tl.float32)
                 dots = tl.maximum(dots, 0.0)
                 scores_block += tl.sum(dots * w[:, None], axis=0)
 
-            tl.store(score_ptrs, scores_block.to(tl.bfloat16), mask=in_bounds)
+            tl.store(score_ptrs, scores_block.to(tl.bfloat16))
         else:
             token_valid = (token_global < visible) & in_bounds
-            k = tl.load(k_ptrs, mask=token_valid[:, None], other=0.0, eviction_policy="evict_first")
+            physical_pages = tl.load(
+                block_table_ptr + b * MAX_PAGES + logical_pages,
+                mask=token_valid,
+                other=0,
+            )
+            k_ptrs = k_idx_cache_ptr + ((physical_pages[:, None] * PAGE_SIZE + page_offsets[:, None]) * DIDX + offs_d[None, :])
+            k = tl.load(k_ptrs, mask=token_valid[:, None], other=0.0)
 
             scores_block = tl.full((BLOCK_N,), 0.0, tl.float32)
             offs_h = tl.arange(0, BLOCK_H)
             for h_base in tl.static_range(0, HIDX, BLOCK_H):
                 h = h_base + offs_h
                 q_ptrs = q_idx_ptr + ((b * HIDX + h[:, None]) * DIDX + offs_d[None, :])
-                q = tl.load(q_ptrs, eviction_policy="evict_last")
-                w = tl.load(w_idx_ptr + b * HIDX + h, eviction_policy="evict_last").to(tl.float32)
+                q = tl.load(q_ptrs)
+                w = tl.load(w_idx_ptr + b * HIDX + h).to(tl.float32)
                 dots = tl.dot(q, tl.trans(k), out_dtype=tl.float32)
                 dots = tl.maximum(dots, 0.0)
                 scores_block += tl.sum(dots * w[:, None], axis=0)
@@ -410,22 +415,6 @@ def _dsa_indexer_scores_head_blocked_kernel(
             tl.store(score_ptrs, out.to(tl.bfloat16), mask=in_bounds)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"GROUP_PAGES": 2}, num_warps=4, num_stages=2),
-        triton.Config({"GROUP_PAGES": 2}, num_warps=8, num_stages=2),
-        triton.Config({"GROUP_PAGES": 2}, num_warps=16, num_stages=2),
-        triton.Config({"GROUP_PAGES": 4}, num_warps=4, num_stages=2),
-        triton.Config({"GROUP_PAGES": 4}, num_warps=8, num_stages=2),
-        triton.Config({"GROUP_PAGES": 4}, num_warps=16, num_stages=2),
-        triton.Config({"GROUP_PAGES": 8}, num_warps=4, num_stages=2),
-        triton.Config({"GROUP_PAGES": 8}, num_warps=8, num_stages=2),
-        triton.Config({"GROUP_PAGES": 8}, num_warps=16, num_stages=2),
-        triton.Config({"GROUP_PAGES": 16}, num_warps=8, num_stages=2),
-        triton.Config({"GROUP_PAGES": 16}, num_warps=16, num_stages=2),
-    ],
-    key=["TOTAL_PAGES", "MAX_PAGES"],
-)
 @triton.jit
 def _dsa_indexer_scores_grouped_pages_kernel(
     q_idx_ptr,
@@ -434,7 +423,6 @@ def _dsa_indexer_scores_grouped_pages_kernel(
     block_table_ptr,
     context_lens_ptr,
     scores_ptr,
-    TOTAL_PAGES: tl.constexpr,
     HIDX: tl.constexpr,
     DIDX: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
@@ -528,7 +516,7 @@ def _launch_tiny(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B
     )
 
 
-def _launch_wide(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len, block_n):
+def _launch_wide(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len, block_n, num_warps):
     grid = (triton.cdiv(max_seq_len, block_n), B)
     _dsa_indexer_scores_wide_token_kernel[grid](
         q_idx,
@@ -543,7 +531,7 @@ def _launch_wide(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B
         MAX_PAGES=MaxPages,
         MAX_SEQ_LEN=max_seq_len,
         BLOCK_N=block_n,
-        num_warps=8,
+        num_warps=num_warps,
         num_stages=2,
     )
 
@@ -570,7 +558,8 @@ def _launch_head_blocked(q_idx, k_idx_cache, w_idx, block_table, context_lens, s
 
 
 def _launch_grouped(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len):
-    grid = lambda META: (triton.cdiv(MaxPages, META["GROUP_PAGES"]), B)
+    group_pages = 16
+    grid = (triton.cdiv(MaxPages, group_pages), B)
     _dsa_indexer_scores_grouped_pages_kernel[grid](
         q_idx,
         k_idx_cache,
@@ -578,12 +567,14 @@ def _launch_grouped(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores
         block_table,
         context_lens,
         scores,
-        TOTAL_PAGES=B * MaxPages,
         HIDX=64,
         DIDX=128,
         PAGE_SIZE=64,
         MAX_PAGES=MaxPages,
         MAX_SEQ_LEN=max_seq_len,
+        GROUP_PAGES=group_pages,
+        num_warps=8,
+        num_stages=2,
     )
 
 
@@ -637,56 +628,40 @@ def run_kernel(
         )
         return
 
+
     if total_pages <= TINY_TOTAL_PAGES_THRESHOLD:
         _launch_tiny(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len, 16)
         return
 
     if MaxPages == 64:
-        _launch_wide(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len, 128)
+        _launch_wide(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len, 128, 8)
         return
 
-    if MaxPages >= 128 and total_pages <= SMALL_TOTAL_PAGES_THRESHOLD:
+    if MaxPages == 128 and total_pages <= SMALL_TOTAL_PAGES_THRESHOLD:
         _launch_head_blocked(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len, 128, 32)
         return
 
-    if MaxPages == 128 and total_pages >= 4096:
-        _launch_wide(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len, 128)
-        return
-
-    if total_pages >= 8192:
+    if MaxPages >= 512:
         _launch_grouped(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len)
         return
 
-    grid = (MaxPages, B)
-    if total_pages <= SMALL_TOTAL_PAGES_THRESHOLD:
-        _dsa_indexer_scores_small_full_kernel[grid](
-            q_idx,
-            k_idx_cache,
-            w_idx,
-            block_table,
-            context_lens,
-            scores,
-            HIDX=64,
-            DIDX=128,
-            PAGE_SIZE=64,
-            MAX_PAGES=MaxPages,
-            MAX_SEQ_LEN=max_seq_len,
-            num_warps=8,
-            num_stages=2,
-        )
+    if MaxPages >= 128:
+        _launch_wide(q_idx, k_idx_cache, w_idx, block_table, context_lens, scores, B, MaxPages, max_seq_len, 128, 8)
         return
 
-    _dsa_indexer_scores_large_full_kernel[grid](
+    grid = (MaxPages, B)
+    _dsa_indexer_scores_small_full_kernel[grid](
         q_idx,
         k_idx_cache,
         w_idx,
         block_table,
         context_lens,
         scores,
-        TOTAL_PAGES=total_pages,
         HIDX=64,
         DIDX=128,
         PAGE_SIZE=64,
         MAX_PAGES=MaxPages,
         MAX_SEQ_LEN=max_seq_len,
+        num_warps=8,
+        num_stages=2,
     )
