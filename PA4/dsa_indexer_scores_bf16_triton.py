@@ -111,7 +111,7 @@ def _dsa_indexer_scores_official_2page_kernel(
 
 
 @triton.jit
-def _dsa_indexer_scores_official_group4_page_kernel(
+def _dsa_indexer_scores_official_group_page_kernel(
     q_idx,
     k_idx_cache,
     w_idx,
@@ -119,12 +119,13 @@ def _dsa_indexer_scores_official_group4_page_kernel(
     context_lens,
     scores,
     MAX_PAGES: tl.constexpr,
+    GROUP_PAGES: tl.constexpr,
 ):
     group_id = tl.program_id(0)
     b = tl.program_id(1)
 
     max_seq_len = MAX_PAGES * 64
-    first_page = group_id * 4
+    first_page = group_id * GROUP_PAGES
     first_start = first_page * 64
     visible = tl.load(context_lens + b, eviction_policy="evict_last")
 
@@ -143,9 +144,9 @@ def _dsa_indexer_scores_official_group4_page_kernel(
             eviction_policy="evict_last",
         ).to(tl.float32)
 
-        full_group = (first_page + 3 < MAX_PAGES) & (first_start + 256 <= visible)
+        full_group = (first_page + GROUP_PAGES <= MAX_PAGES) & (first_start + GROUP_PAGES * 64 <= visible)
         if full_group:
-            for page_i in tl.static_range(0, 4):
+            for page_i in tl.static_range(0, GROUP_PAGES):
                 logical_page = first_page + page_i
                 page_start = first_start + page_i * 64
                 physical_page = tl.load(
@@ -160,7 +161,7 @@ def _dsa_indexer_scores_official_group4_page_kernel(
                 score = tl.sum(tl.maximum(dots, 0.0) * weights[None, :], axis=1)
                 tl.store(scores + b * max_seq_len + page_start + offs_n, score)
         else:
-            for page_i in tl.static_range(0, 4):
+            for page_i in tl.static_range(0, GROUP_PAGES):
                 logical_page = first_page + page_i
                 page_start = first_start + page_i * 64
                 page_in_range = logical_page < MAX_PAGES
@@ -186,7 +187,7 @@ def _dsa_indexer_scores_official_group4_page_kernel(
                 else:
                     tl.store(out_ptrs, neg_inf, mask=page_in_range)
     else:
-        for page_i in tl.static_range(0, 4):
+        for page_i in tl.static_range(0, GROUP_PAGES):
             logical_page = first_page + page_i
             page_start = first_start + page_i * 64
             page_in_range = logical_page < MAX_PAGES
@@ -321,8 +322,11 @@ def run_kernel(
 
     total_pages = B * MaxPages
     if Hidx == 64 and Didx == 128 and PageSize == 64 and total_pages >= 4096:
-        grid = (triton.cdiv(MaxPages, 4), B)
-        _dsa_indexer_scores_official_group4_page_kernel[grid](
+        # Group4 was the sweet spot in benchmarking: group8 reduced parallelism
+        # and increased the unrolled program body enough to regress case7-10.
+        group_pages = 4
+        grid = (triton.cdiv(MaxPages, group_pages), B)
+        _dsa_indexer_scores_official_group_page_kernel[grid](
             q_idx,
             k_idx_cache,
             w_idx,
@@ -330,7 +334,8 @@ def run_kernel(
             context_lens,
             scores,
             MAX_PAGES=MaxPages,
-            num_warps=8,
+            GROUP_PAGES=group_pages,
+            num_warps=4,
             num_stages=3,
         )
         return
