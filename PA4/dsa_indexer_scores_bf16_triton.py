@@ -135,10 +135,15 @@ def _dsa_indexer_scores_official_group_page_kernel(
     neg_inf = tl.full((64,), -float("inf"), tl.float32)
 
     if first_start < visible:
-        q = tl.load(
-            q_idx + ((b * 64 + offs_h[:, None]) * 128 + offs_d[None, :]),
-            eviction_policy="evict_last",
+        q_block = tl.make_block_ptr(
+            base=q_idx + b * 64 * 128,
+            shape=(64, 128),
+            strides=(128, 1),
+            offsets=(0, 0),
+            block_shape=(64, 128),
+            order=(1, 0),
         )
+        q = tl.load(q_block, eviction_policy="evict_last")
         weights = tl.load(
             w_idx + b * 64 + offs_h,
             eviction_policy="evict_last",
@@ -153,10 +158,15 @@ def _dsa_indexer_scores_official_group_page_kernel(
                     block_table + b * MAX_PAGES + logical_page,
                     eviction_policy="evict_first",
                 )
-                k = tl.load(
-                    k_idx_cache + ((physical_page * 64 + offs_n[:, None]) * 128 + offs_d[None, :]),
-                    eviction_policy="evict_first",
+                k_block = tl.make_block_ptr(
+                    base=k_idx_cache + physical_page * 64 * 128,
+                    shape=(64, 128),
+                    strides=(128, 1),
+                    offsets=(0, 0),
+                    block_shape=(64, 128),
+                    order=(1, 0),
                 )
+                k = tl.load(k_block, eviction_policy="evict_first")
                 dots = tl.dot(k, tl.trans(q), out_dtype=tl.float32)
                 score = tl.sum(tl.maximum(dots, 0.0) * weights[None, :], axis=1)
                 tl.store(scores + b * max_seq_len + page_start + offs_n, score)
@@ -173,10 +183,15 @@ def _dsa_indexer_scores_official_group_page_kernel(
                         block_table + b * MAX_PAGES + logical_page,
                         eviction_policy="evict_first",
                     )
-                    k = tl.load(
-                        k_idx_cache + ((physical_page * 64 + offs_n[:, None]) * 128 + offs_d[None, :]),
-                        eviction_policy="evict_first",
+                    k_block = tl.make_block_ptr(
+                        base=k_idx_cache + physical_page * 64 * 128,
+                        shape=(64, 128),
+                        strides=(128, 1),
+                        offsets=(0, 0),
+                        block_shape=(64, 128),
+                        order=(1, 0),
                     )
+                    k = tl.load(k_block, eviction_policy="evict_first")
                     dots = tl.dot(k, tl.trans(q), out_dtype=tl.float32)
                     score = tl.sum(tl.maximum(dots, 0.0) * weights[None, :], axis=1)
                     if page_start + 64 <= visible:
@@ -324,7 +339,12 @@ def run_kernel(
     if Hidx == 64 and Didx == 128 and PageSize == 64 and total_pages >= 4096:
         # Group4 was the sweet spot in benchmarking: group8 reduced parallelism
         # and increased the unrolled program body enough to regress case7-10.
+        # case6 has fewer CTAs and preferred 8 warps; larger cases preferred 4.
         group_pages = 4
+        group_warps = 8 if total_pages == 4096 else 4
+        # Fewer stages reduce register pressure for the unrolled group4 body on
+        # large cases; keep case6 on the previous safer config.
+        group_stages = 3 if total_pages == 4096 else 2
         grid = (triton.cdiv(MaxPages, group_pages), B)
         _dsa_indexer_scores_official_group_page_kernel[grid](
             q_idx,
@@ -335,8 +355,8 @@ def run_kernel(
             scores,
             MAX_PAGES=MaxPages,
             GROUP_PAGES=group_pages,
-            num_warps=4,
-            num_stages=3,
+            num_warps=group_warps,
+            num_stages=group_stages,
         )
         return
 
