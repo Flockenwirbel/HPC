@@ -50,10 +50,6 @@ def _dsa_indexer_scores_official_2page_kernel(
             eviction_policy="evict_last",
         ).to(tl.float32)
 
-        # Full hot path for official large cases.  A 128-token tile is exactly
-        # two logical pages; load the two physical page ids once and keep both K
-        # page loads affine/contiguous instead of doing per-token block_table
-        # gathers.  The fallback below handles the one partial context/tail tile.
         if (tile_start + 128 <= visible) & (tile_start + 128 <= max_seq_len):
             logical_page0 = tile_start // 64
             physical_page0 = tl.load(
@@ -73,9 +69,6 @@ def _dsa_indexer_scores_official_2page_kernel(
                 eviction_policy="evict_first",
             )
 
-            # Produce [token, head] so the epilogue reduces the last axis
-            # (heads) instead of reducing across the first dimension of a
-            # [head, token] accumulator.
             dots = tl.dot(k, tl.trans(q), out_dtype=tl.float32)
             score = tl.sum(tl.maximum(dots, 0.0) * weights[None, :], axis=1)
             tl.store(scores + b * max_seq_len + tokens, score)
@@ -337,13 +330,8 @@ def run_kernel(
 
     total_pages = B * MaxPages
     if Hidx == 64 and Didx == 128 and PageSize == 64 and total_pages >= 4096:
-        # Group4 was the sweet spot in benchmarking: group8 reduced parallelism
-        # and increased the unrolled program body enough to regress case7-10.
-        # case6 has fewer CTAs and preferred 8 warps; larger cases preferred 4.
         group_pages = 4
         group_warps = 8 if total_pages == 4096 else 4
-        # Fewer stages reduce register pressure for the unrolled group4 body on
-        # large cases; keep case6 on the previous safer config.
         group_stages = 3 if total_pages == 4096 else 2
         grid = (triton.cdiv(MaxPages, group_pages), B)
         _dsa_indexer_scores_official_group_page_kernel[grid](
@@ -357,6 +345,22 @@ def run_kernel(
             GROUP_PAGES=group_pages,
             num_warps=group_warps,
             num_stages=group_stages,
+        )
+        return
+
+    if Hidx == 64 and Didx == 128 and PageSize == 64 and total_pages >= 1024:
+        grid = (triton.cdiv(MaxPages, 4), B)
+        _dsa_indexer_scores_official_group_page_kernel[grid](
+            q_idx,
+            k_idx_cache,
+            w_idx,
+            block_table,
+            context_lens,
+            scores,
+            MAX_PAGES=MaxPages,
+            GROUP_PAGES=4,
+            num_warps=4,
+            num_stages=3,
         )
         return
 
